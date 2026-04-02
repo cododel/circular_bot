@@ -62,6 +62,9 @@ def create_text_overlay(
         img.save(output_path)
         return output_path
     
+    # Create draw object
+    draw = ImageDraw.Draw(img)
+    
     # Get font metrics
     temp_draw = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
     char_height = temp_draw.textbbox((0, 0), "Ay", font=font)[3]
