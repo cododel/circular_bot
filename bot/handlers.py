@@ -8,12 +8,19 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-from bot.config import TEMP_DIR, DEFAULT_OVERLAY_TEXT
+from bot.config import TEMP_DIR, DEFAULT_OVERLAY_TEXT, ALLOWED_USERS
 from bot.keyboards import get_aspect_ratio_keyboard, get_username_source_keyboard
 from bot.video_processor import process_video_async, cleanup_temp_files
 
 
 router = Router()
+
+
+def is_user_allowed(user_id: int) -> bool:
+    """Check if user is in whitelist (if whitelist is configured)."""
+    if ALLOWED_USERS is None:
+        return True  # No whitelist = allow all
+    return user_id in ALLOWED_USERS
 
 
 class ProcessingState(StatesGroup):
@@ -98,6 +105,10 @@ def normalize_username(text: str) -> str:
 @router.message(Command("start"))
 async def cmd_start(message: Message):
     """Handle /start command."""
+    # Check whitelist
+    if not is_user_allowed(message.from_user.id):
+        return  # Silently ignore
+    
     await message.answer(
         "👋 Привет! Я бот для обработки кружочков Telegram.\n\n"
         "Отправь мне video note (кружок), и я добавлю на него:\n"
@@ -111,6 +122,10 @@ async def cmd_start(message: Message):
 @router.message(F.video_note)
 async def handle_video_note(message: Message, state: FSMContext, bot: Bot):
     """Handle incoming video note (circle)."""
+    # Check whitelist
+    if not is_user_allowed(message.from_user.id):
+        return  # Silently ignore
+    
     # Store video info in state
     await state.update_data(
         video_note_file_id=message.video_note.file_id,
