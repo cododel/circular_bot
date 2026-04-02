@@ -4,13 +4,13 @@ import asyncio
 import re
 from typing import Tuple, Callable, Optional
 from PIL import Image, ImageDraw, ImageFont
-from bot.config import TEMP_DIR, DEFAULT_OVERLAY_TEXT
+from bot.config import TEMP_DIR
 
 
 def create_text_overlay(
     width: int,
     height: int,
-    text: str = DEFAULT_OVERLAY_TEXT,
+    text: str = "",
     output_path: str = None,
     circle_size: int = None
 ) -> str:
@@ -118,7 +118,7 @@ async def process_video_async(
     input_path: str,
     output_path: str,
     target_size: Tuple[int, int],
-    overlay_text: str = DEFAULT_OVERLAY_TEXT,
+    overlay_text: str = "",
     progress_callback: Optional[Callable[[int], None]] = None,
     video_duration: float = 0.0,
 ) -> str:

@@ -8,7 +8,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-from bot.config import TEMP_DIR, DEFAULT_OVERLAY_TEXT, ALLOWED_USERS
+from bot.config import TEMP_DIR, ALLOWED_USERS
 from bot.keyboards import get_aspect_ratio_keyboard, get_username_source_keyboard
 from bot.video_processor import process_video_async, cleanup_temp_files
 
@@ -268,7 +268,7 @@ async def process_ratio_selection(callback: CallbackQuery, state: FSMContext, bo
     # Get stored data
     data = await state.get_data()
     file_id = data.get("video_note_file_id")
-    overlay_text = data.get("overlay_text", DEFAULT_OVERLAY_TEXT)
+    overlay_text = data.get("overlay_text", "")
     video_duration = data.get("video_note_duration", 0)
     
     temp_input = None

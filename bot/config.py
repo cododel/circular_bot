@@ -6,7 +6,6 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-DEFAULT_OVERLAY_TEXT = os.getenv("DEFAULT_OVERLAY_TEXT", "TG: @cododel_dev")
 
 # Optional whitelist: comma-separated list of allowed user IDs
 ALLOW_USER_IDS = os.getenv("ALLOW_USER_IDS", "")
