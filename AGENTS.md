@@ -81,6 +81,38 @@ Input → Split → [Blurred BG] + [Cropped Circle] + [Text Overlay] → Output
 - `bot/keyboards.py` — inline клавиатуры
 - `bot/config.py` — константы и конфигурация
 
+## GitHub Access (SSH Setup)
+
+**Выбранный подход**: SSH keys с кастомными хостами в `~/.ssh/config`
+
+**Почему не PAT**: GitHub отключил HTTPS-аутентификацию для Fine-grained PAT. SSH надёжнее и проще для серверного деплоя.
+
+**Конфигурация**:
+```ssh
+# ~/.ssh/config
+Host github-circular-bot
+    HostName github.com
+    User git
+    IdentityFile ~/.ssh/id_ed25519_circular_bot
+    IdentitiesOnly yes
+    StrictHostKeyChecking accept-new
+```
+
+**Именование**:
+- Ключ: `id_ed25519_circular_bot` (семантично, по имени проекта)
+- Хост: `github-circular-bot` (кастомный, для каждого репо свой)
+
+**Remote URL**:
+```
+git@github-circular-bot:cododel/circular_bot.git
+```
+
+**Для новых проектов**:
+1. Сгенерировать ключ: `ssh-keygen -t ed25519 -C "project-name" -f ~/.ssh/id_ed25519_<project>`
+2. Добавить в `~/.ssh/config` новый Host
+3. Добавить public key в GitHub → Settings → Deploy keys
+4. Использовать `git@github-<project>:user/repo.git`
+
 ## Notes
 
 - Кружок Telegram всегда 1:1, 240×240 до 640×640
