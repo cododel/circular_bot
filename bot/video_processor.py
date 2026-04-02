@@ -2,6 +2,7 @@
 import os
 import asyncio
 import re
+import math
 from typing import Tuple, Callable, Optional
 from PIL import Image, ImageDraw, ImageFont
 from bot.config import TEMP_DIR
@@ -14,13 +15,12 @@ def create_text_overlay(
     output_path: str = None,
     circle_size: int = None
 ) -> str:
-    """Create PNG with text overlay positioned at bottom-right of the circle."""
+    """Create PNG with text curved along the bottom-right arc of the circle."""
     if output_path is None:
         output_path = os.path.join(TEMP_DIR, f"overlay_{width}x{height}.png")
     
     # Create transparent image
     img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
     
     # Try to use a nice font, fallback to default
     try:
@@ -33,40 +33,69 @@ def create_text_overlay(
         font = None
         for fp in font_paths:
             if os.path.exists(fp):
-                font = ImageFont.truetype(fp, int(height * 0.035))
+                font = ImageFont.truetype(fp, int(height * 0.032))
                 break
         if font is None:
             font = ImageFont.load_default()
     except Exception:
         font = ImageFont.load_default()
     
-    # Calculate text size
-    bbox = draw.textbbox((0, 0), text, font=font)
-    text_width = bbox[2] - bbox[0]
-    text_height = bbox[3] - bbox[1]
-    
-    # Position: bottom-right of the circle (not video)
-    # Circle is centered, so right edge is (width + circle_size) / 2
+    # Circle center and radius for text placement
     if circle_size is None:
         circle_size = min(width, height) * 0.82
     
-    circle_right_edge = (width + circle_size) // 2
-    circle_bottom_edge = (height + circle_size) // 2
+    circle_radius = circle_size // 2
+    center_x = width // 2
+    center_y = height // 2
     
-    # Position text just outside the circle's right edge
-    padding_x = int(width * 0.02)  # Small gap from circle
-    padding_y = int(height * 0.02)  # Gap from bottom
+    # Text radius: slightly outside the circle
+    text_radius = circle_radius + int(height * 0.025)
     
-    x = circle_right_edge + padding_x
-    y = circle_bottom_edge - text_height - padding_y
+    # Arc range: from 15° (right) to 75° (bottom-right)
+    # This covers the bottom-right quadrant outside the circle
+    start_angle = 15   # degrees from right horizontal
+    end_angle = 75     # degrees going clockwise
     
-    # Ensure text stays within video bounds
-    x = min(x, width - text_width - int(width * 0.02))
+    # Calculate angle step per character
+    text_len = len(text)
+    if text_len <= 1:
+        angle_step = 0
+    else:
+        angle_step = (end_angle - start_angle) / (text_len - 1)
     
-    # Draw text with slight shadow for readability
-    shadow_offset = 2
-    draw.text((x + shadow_offset, y + shadow_offset), text, font=font, fill=(0, 0, 0, 180))
-    draw.text((x, y), text, font=font, fill=(255, 255, 255, 230))
+    # Draw each character along the arc
+    for i, char in enumerate(text):
+        angle_deg = start_angle + (i * angle_step)
+        angle_rad = math.radians(angle_deg)
+        
+        # Position on the circle
+        char_x = center_x + text_radius * math.cos(angle_rad)
+        char_y = center_y + text_radius * math.sin(angle_rad)
+        
+        # Create small image for this character
+        char_bbox = ImageDraw.Draw(Image.new("RGBA", (1, 1))).textbbox((0, 0), char, font=font)
+        char_width = char_bbox[2] - char_bbox[0]
+        char_height = char_bbox[3] - char_bbox[1]
+        
+        # Character image with padding for rotation
+        pad = max(char_width, char_height) + 10
+        char_img = Image.new("RGBA", (pad * 2, pad * 2), (0, 0, 0, 0))
+        char_draw = ImageDraw.Draw(char_img)
+        
+        # Draw character with shadow
+        char_x_offset = pad - char_width // 2
+        char_y_offset = pad - char_height // 2
+        char_draw.text((char_x_offset + 2, char_y_offset + 2), char, font=font, fill=(0, 0, 0, 180))
+        char_draw.text((char_x_offset, char_y_offset), char, font=font, fill=(255, 255, 255, 230))
+        
+        # Rotate: tangent to circle (angle + 90° for text to follow curve)
+        rotation = angle_deg + 90
+        char_rotated = char_img.rotate(-rotation, expand=True, resample=Image.BICUBIC)
+        
+        # Paste onto main image
+        paste_x = int(char_x - char_rotated.width // 2)
+        paste_y = int(char_y - char_rotated.height // 2)
+        img.paste(char_rotated, (paste_x, paste_y), char_rotated)
     
     img.save(output_path)
     return output_path
