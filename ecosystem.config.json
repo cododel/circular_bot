@@ -1,0 +1,22 @@
+{
+  "apps": [
+    {
+      "name": "circle-overlay-bot",
+      "script": "venv/bin/python",
+      "args": "-m bot",
+      "cwd": "/root/projects/circle-overlay-bot",
+      "env": {
+        "PYTHONUNBUFFERED": "1"
+      },
+      "log_file": "/root/projects/circle-overlay-bot/logs/combined.log",
+      "out_file": "/root/projects/circle-overlay-bot/logs/out.log",
+      "err_file": "/root/projects/circle-overlay-bot/logs/err.log",
+      "time": true,
+      "autorestart": true,
+      "max_restarts": 5,
+      "min_uptime": "10s",
+      "watch": false,
+      "max_memory_restart": "512M"
+    }
+  ]
+}
