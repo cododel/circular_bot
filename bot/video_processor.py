@@ -48,9 +48,14 @@ def create_text_overlay(
     circle_right = (width + circle_size) // 2
     circle_bottom = (height + circle_size) // 2
     
-    # Text position: just outside circle, bottom-right
+    # Measure text width
+    bbox = draw.textbbox((0, 0), text, font=font)
+    text_width = bbox[2] - bbox[0]
+    text_height = bbox[3] - bbox[1]
+    
+    # Text position: bottom-right, but keep within video bounds
     padding = int(height * 0.02)
-    text_x = circle_right + padding
+    text_x = min(circle_right + padding, width - text_width - padding)
     text_y = circle_bottom - padding
     
     # Draw text with shadow
