@@ -220,8 +220,7 @@ async def handle_custom_username_selection(callback: CallbackQuery, state: FSMCo
         "Примеры:\n"
         "• @channel_name\n"
         "• TG: @username\n"
-        "• Мой канал\n\n"
-        "Я автоматически добавлю «TG: » если это похоже на username."
+        "• Мой канал"
     )
     await state.set_state(ProcessingState.waiting_for_text)
 
@@ -229,10 +228,7 @@ async def handle_custom_username_selection(callback: CallbackQuery, state: FSMCo
 @router.message(ProcessingState.waiting_for_text, F.text)
 async def handle_overlay_text_input(message: Message, state: FSMContext):
     """Handle manual overlay text input from user."""
-    raw_text = message.text.strip()
-    
-    # Normalize the username
-    overlay_text = normalize_username(raw_text)
+    overlay_text = message.text.strip()
     
     if len(overlay_text) > 50:
         await message.answer(
