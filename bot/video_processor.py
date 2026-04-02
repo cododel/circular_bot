@@ -15,12 +15,13 @@ def create_text_overlay(
     output_path: str = None,
     circle_size: int = None
 ) -> str:
-    """Create PNG with text curved along the bottom-right arc of the circle."""
+    """Create PNG with text overlay at bottom-right of the circle."""
     if output_path is None:
         output_path = os.path.join(TEMP_DIR, f"overlay_{width}x{height}.png")
     
     # Create transparent image
     img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
     
     # Try to use a nice font, fallback to default
     try:
@@ -33,56 +34,28 @@ def create_text_overlay(
         font = None
         for fp in font_paths:
             if os.path.exists(fp):
-                font = ImageFont.truetype(fp, int(height * 0.032))
+                font = ImageFont.truetype(fp, int(height * 0.035))
                 break
         if font is None:
             font = ImageFont.load_default()
     except Exception:
         font = ImageFont.load_default()
     
-    # Circle center and radius for text placement
+    # Circle position
     if circle_size is None:
         circle_size = min(width, height) * 0.82
     
-    circle_radius = circle_size // 2
-    center_x = width // 2
-    center_y = height // 2
+    circle_right = (width + circle_size) // 2
+    circle_bottom = (height + circle_size) // 2
     
-    # Text radius: slightly outside the circle
-    text_radius = circle_radius + int(height * 0.025)
+    # Text position: just outside circle, bottom-right
+    padding = int(height * 0.02)
+    text_x = circle_right + padding
+    text_y = circle_bottom - padding
     
-    # Simple curved text: position characters along arc
-    # Arc: 75° (bottom) to 35° (right-bottom)
-    arc_start = 75
-    arc_end = 35
-    arc_span = arc_start - arc_end
-    
-    text_len = len(text)
-    if text_len == 0:
-        img.save(output_path)
-        return output_path
-    
-    # Create draw object
-    draw = ImageDraw.Draw(img)
-    
-    # Get font metrics
-    temp_draw = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
-    char_height = temp_draw.textbbox((0, 0), "Ay", font=font)[3]
-    
-    # Fixed angle step for even distribution
-    angle_step = arc_span / max(1, text_len - 1) if text_len > 1 else 0
-    
-    for i, char in enumerate(text):
-        angle_deg = arc_start - (i * angle_step)
-        angle_rad = math.radians(angle_deg)
-        
-        # Position on circle
-        x = center_x + int(text_radius * math.cos(angle_rad))
-        y = center_y + int(text_radius * math.sin(angle_rad))
-        
-        # Draw character with shadow
-        draw.text((x + 2, y + 2), char, font=font, fill=(0, 0, 0, 180), anchor="mm")
-        draw.text((x, y), char, font=font, fill=(255, 255, 255, 230), anchor="mm")
+    # Draw text with shadow
+    draw.text((text_x + 2, text_y + 2), text, font=font, fill=(0, 0, 0, 180))
+    draw.text((text_x, text_y), text, font=font, fill=(255, 255, 255, 230))
     
     img.save(output_path)
     return output_path
