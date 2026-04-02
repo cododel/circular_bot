@@ -202,7 +202,7 @@ async def process_video_async(
                 process.wait(),
                 read_stderr(),
             ),
-            timeout=300  # 5 minutes timeout
+            timeout=480  # 8 minutes timeout
         )
         
         if process.returncode != 0:
@@ -223,7 +223,7 @@ async def process_video_async(
     except asyncio.TimeoutError:
         process.kill()
         await process.wait()
-        raise RuntimeError("Processing timeout (5 minutes)")
+        raise RuntimeError("Processing timeout (8 minutes)")
 
 
 def cleanup_temp_files(*paths: str):
