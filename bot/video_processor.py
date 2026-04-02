@@ -51,51 +51,77 @@ def create_text_overlay(
     # Text radius: slightly outside the circle
     text_radius = circle_radius + int(height * 0.025)
     
-    # Arc range: from 15° (right) to 75° (bottom-right)
-    # This covers the bottom-right quadrant outside the circle
-    start_angle = 15   # degrees from right horizontal
-    end_angle = 75     # degrees going clockwise
+    # Determine zone based on text position
+    # For bottom-right placement (default): go from higher angle to lower
+    # Text should read "upwards" along the curve for bottom-right zone
     
-    # Calculate angle step per character
+    # Arc range: bottom-right zone (45° to 85°)
+    # Start from bottom (85°) and go up-right (45°) so text reads bottom-to-top
+    start_angle = 85   # bottom
+    end_angle = 45     # up-right
+    
     text_len = len(text)
     if text_len <= 1:
         angle_step = 0
     else:
         angle_step = (end_angle - start_angle) / (text_len - 1)
     
+    # Calculate character widths first for even spacing
+    temp_draw = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    char_widths = []
+    for char in text:
+        bbox = temp_draw.textbbox((0, 0), char, font=font)
+        char_widths.append(bbox[2] - bbox[0])
+    
+    # Total arc length we want to cover (in degrees)
+    total_arc = 40  # degrees
+    
     # Draw each character along the arc
+    current_angle = start_angle
     for i, char in enumerate(text):
-        angle_deg = start_angle + (i * angle_step)
-        angle_rad = math.radians(angle_deg)
-        
-        # Position on the circle
+        # Calculate position on the circle
+        angle_rad = math.radians(current_angle)
         char_x = center_x + text_radius * math.cos(angle_rad)
         char_y = center_y + text_radius * math.sin(angle_rad)
         
-        # Create small image for this character
-        char_bbox = ImageDraw.Draw(Image.new("RGBA", (1, 1))).textbbox((0, 0), char, font=font)
-        char_width = char_bbox[2] - char_bbox[0]
-        char_height = char_bbox[3] - char_bbox[1]
+        # Get character dimensions
+        bbox = temp_draw.textbbox((0, 0), char, font=font)
+        char_width = bbox[2] - bbox[0]
+        char_height = bbox[3] - bbox[1]
         
         # Character image with padding for rotation
-        pad = max(char_width, char_height) + 10
+        pad = max(char_width, char_height) + 20
         char_img = Image.new("RGBA", (pad * 2, pad * 2), (0, 0, 0, 0))
         char_draw = ImageDraw.Draw(char_img)
         
-        # Draw character with shadow
+        # Draw character with shadow (centered)
         char_x_offset = pad - char_width // 2
         char_y_offset = pad - char_height // 2
         char_draw.text((char_x_offset + 2, char_y_offset + 2), char, font=font, fill=(0, 0, 0, 180))
         char_draw.text((char_x_offset, char_y_offset), char, font=font, fill=(255, 255, 255, 230))
         
-        # Rotate: tangent to circle (angle + 90° for text to follow curve)
-        rotation = angle_deg + 90
+        # Rotate: for bottom-right zone, tangent points "up-left"
+        # At 85° (bottom), tangent is ~175° (almost left)
+        # At 45° (right-bottom), tangent is ~135° (up-left)
+        # Formula: angle + 90 gives outward normal, we need tangent
+        # For bottom arc, tangent is angle - 90 (going counter-clockwise)
+        rotation = current_angle - 90
         char_rotated = char_img.rotate(-rotation, expand=True, resample=Image.BICUBIC)
         
         # Paste onto main image
         paste_x = int(char_x - char_rotated.width // 2)
         paste_y = int(char_y - char_rotated.height // 2)
         img.paste(char_rotated, (paste_x, paste_y), char_rotated)
+        
+        # Advance angle based on character width (fixed spacing)
+        if i < text_len - 1:
+            # Convert character width to angle step
+            # arc_length = radius * angle (in radians)
+            # angle = arc_length / radius
+            spacing_factor = 1.2  # extra spacing between letters
+            arc_len = (char_width * spacing_factor) / (height * 0.001)  # normalize
+            angle_delta = math.degrees(arc_len / text_radius)
+            current_angle += angle_delta
     
     img.save(output_path)
     return output_path
