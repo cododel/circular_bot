@@ -11,9 +11,10 @@ def create_text_overlay(
     width: int,
     height: int,
     text: str = DEFAULT_OVERLAY_TEXT,
-    output_path: str = None
+    output_path: str = None,
+    circle_size: int = None
 ) -> str:
-    """Create PNG with text overlay for bottom-right corner."""
+    """Create PNG with text overlay positioned at bottom-right of the circle."""
     if output_path is None:
         output_path = os.path.join(TEMP_DIR, f"overlay_{width}x{height}.png")
     
@@ -44,10 +45,23 @@ def create_text_overlay(
     text_width = bbox[2] - bbox[0]
     text_height = bbox[3] - bbox[1]
     
-    # Position: bottom-right with padding
-    padding = int(width * 0.04)
-    x = width - text_width - padding
-    y = height - text_height - padding - int(height * 0.02)
+    # Position: bottom-right of the circle (not video)
+    # Circle is centered, so right edge is (width + circle_size) / 2
+    if circle_size is None:
+        circle_size = min(width, height) * 0.82
+    
+    circle_right_edge = (width + circle_size) // 2
+    circle_bottom_edge = (height + circle_size) // 2
+    
+    # Position text just outside the circle's right edge
+    padding_x = int(width * 0.02)  # Small gap from circle
+    padding_y = int(height * 0.02)  # Gap from bottom
+    
+    x = circle_right_edge + padding_x
+    y = circle_bottom_edge - text_height - padding_y
+    
+    # Ensure text stays within video bounds
+    x = min(x, width - text_width - int(width * 0.02))
     
     # Draw text with slight shadow for readability
     shadow_offset = 2
@@ -115,18 +129,18 @@ async def process_video_async(
     width, height = target_size
     
     # Create overlays
-    text_overlay = create_text_overlay(width, height, overlay_text)
-    
-    # Determine circle size
     circle_size = min(width, height) * 0.82
     circle_size = int(circle_size)
     circle_size = (circle_size // 2) * 2
     
+    text_overlay = create_text_overlay(width, height, overlay_text, circle_size=circle_size)
+    
     circle_mask = create_circle_mask(circle_size)
     
     # Build FFmpeg command with progress output
+    # Zoom reduced from 1.15 to 1.08
     filter_complex = (
-        f"[0:v]scale={int(width*1.15)}:{int(height*1.15)}:force_original_aspect_ratio=increase,"
+        f"[0:v]scale={int(width*1.08)}:{int(height*1.08)}:force_original_aspect_ratio=increase,"
         f"crop={width}:{height},"
         f"boxblur=40:40,"
         f"eq=brightness=-0.15:contrast=1.1,"
