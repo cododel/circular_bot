@@ -5,7 +5,12 @@ import re
 import math
 from typing import Tuple, Callable, Optional
 from PIL import Image, ImageDraw, ImageFont
-from bot.config import TEMP_DIR
+from bot.config import (
+    TEMP_DIR, PROCESSING_TIMEOUT, PROGRESS_UPDATE_INTERVAL,
+    ZOOM_SCALE, CIRCLE_SIZE_RATIO, BACKGROUND_BLUR,
+    TEXT_FONT_SIZE_RATIO, TEXT_PADDING_RATIO,
+    BRIGHTNESS_ADJUST, CONTRAST_ADJUST
+)
 
 
 def create_text_overlay(
@@ -34,7 +39,7 @@ def create_text_overlay(
         font = None
         for fp in font_paths:
             if os.path.exists(fp):
-                font = ImageFont.truetype(fp, int(height * 0.035))
+                font = ImageFont.truetype(fp, int(height * TEXT_FONT_SIZE_RATIO))
                 break
         if font is None:
             font = ImageFont.load_default()
@@ -43,7 +48,7 @@ def create_text_overlay(
     
     # Circle position
     if circle_size is None:
-        circle_size = min(width, height) * 0.82
+        circle_size = min(width, height) * CIRCLE_SIZE_RATIO
     
     circle_right = (width + circle_size) // 2
     circle_bottom = (height + circle_size) // 2
@@ -54,7 +59,7 @@ def create_text_overlay(
     text_height = bbox[3] - bbox[1]
     
     # Text position: bottom-right, but keep within video bounds
-    padding = int(height * 0.02)
+    padding = int(height * TEXT_PADDING_RATIO)
     text_x = min(circle_right + padding, width - text_width - padding)
     text_y = circle_bottom - padding
     
@@ -76,7 +81,7 @@ def create_circle_mask(size: int, output_path: str = None) -> str:
     draw = ImageDraw.Draw(img)
     
     # Draw white circle - меньше на 2% от размера
-    margin = int(size * 0.02)
+    margin = int(size * 0.02)  # TODO: make configurable
     draw.ellipse(
         [margin, margin, size - margin, size - margin],
         fill=255
@@ -123,7 +128,7 @@ async def process_video_async(
     width, height = target_size
     
     # Create overlays
-    circle_size = min(width, height) * 0.82
+    circle_size = min(width, height) * CIRCLE_SIZE_RATIO
     circle_size = int(circle_size)
     circle_size = (circle_size // 2) * 2
     
@@ -132,12 +137,11 @@ async def process_video_async(
     circle_mask = create_circle_mask(circle_size)
     
     # Build FFmpeg command with progress output
-    # Zoom reduced from 1.15 to 1.08
     filter_complex = (
-        f"[0:v]scale={int(width*1.08)}:{int(height*1.08)}:force_original_aspect_ratio=increase,"
+        f"[0:v]scale={int(width*ZOOM_SCALE)}:{int(height*ZOOM_SCALE)}:force_original_aspect_ratio=increase,"
         f"crop={width}:{height},"
-        f"boxblur=40:40,"
-        f"eq=brightness=-0.15:contrast=1.1,"
+        f"boxblur={BACKGROUND_BLUR}:{BACKGROUND_BLUR},"
+        f"eq=brightness={BRIGHTNESS_ADJUST}:contrast={CONTRAST_ADJUST},"
         f"format=yuv420p[bg];"
         f"[0:v]scale={circle_size}:{circle_size}[fg];"
         f"[fg][2:v]alphamerge,format=rgba[circle];"
@@ -170,12 +174,14 @@ async def process_video_async(
         stderr=asyncio.subprocess.PIPE,
     )
     
-    # Track progress
+    # Track progress (time-based updates)
+    import time
+    last_update_time = 0
     last_reported_progress = -1
     
     # Read stderr for progress
     async def read_stderr():
-        nonlocal last_reported_progress
+        nonlocal last_update_time, last_reported_progress
         while True:
             line = await process.stderr.readline()
             if not line:
@@ -187,8 +193,10 @@ async def process_video_async(
                 progress = parse_ffmpeg_progress(line_str, video_duration)
                 if progress is not None:
                     progress_int = int(progress)
-                    # Report only on 10% increments to avoid spam
-                    if progress_int >= last_reported_progress + 10:
+                    current_time = time.time()
+                    # Update every PROGRESS_UPDATE_INTERVAL seconds (temporary stub)
+                    if current_time - last_update_time >= PROGRESS_UPDATE_INTERVAL:
+                        last_update_time = current_time
                         last_reported_progress = progress_int
                         try:
                             await progress_callback(progress_int)
@@ -202,7 +210,7 @@ async def process_video_async(
                 process.wait(),
                 read_stderr(),
             ),
-            timeout=480  # 8 minutes timeout
+            timeout=PROCESSING_TIMEOUT  # configurable timeout
         )
         
         if process.returncode != 0:
