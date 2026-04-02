@@ -154,10 +154,6 @@ circle-overlay-bot/
 └── README.md
 ```
 
-## GitHub
-
-Репозиторий: `git@github-circular-bot:cododel/circular_bot.git`
-
 ## Лицензия
 
 MIT
