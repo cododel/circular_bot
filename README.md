@@ -160,8 +160,6 @@ bot/**,Dockerfile,docker-compose.yml,requirements.txt,.dockerignore
 
 При каждом push в `master` Dokploy автоматически пересоберёт и redeploy'ит бота.
 
-При каждом push в `master` Dokploy автоматически пересоберёт и redeploy'ит бота.
-
 **Проверка лимитов CPU:**
 Если обработка видео длится >30 секунд:
 
