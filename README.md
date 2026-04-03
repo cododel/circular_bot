@@ -158,6 +158,7 @@ python tests/test_processor.py /path/to/video_note.mp4
 - [x] Ambient blur background
 - [x] Async обработка без блокировки
 - [x] Прогресс обработки в реальном времени
+- [ ] **EST time (оставшееся время) в прогрессе**
 - [x] Выбор источника подписи (автор/отправитель/кастом)
 - [x] Whitelist через ENV
 - [x] Все параметры конфигурируемые через ENV
