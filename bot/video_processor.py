@@ -3,6 +3,8 @@ import os
 import asyncio
 import re
 import math
+import time
+import logging
 from typing import Tuple, Callable, Optional
 from PIL import Image, ImageDraw, ImageFont
 from bot.config import (
@@ -11,6 +13,8 @@ from bot.config import (
     TEXT_FONT_SIZE_RATIO, TEXT_PADDING_RATIO,
     BRIGHTNESS_ADJUST, CONTRAST_ADJUST, FFMPEG_THREADS
 )
+
+logger = logging.getLogger(__name__)
 
 
 def create_text_overlay(
@@ -189,11 +193,17 @@ async def process_video_async(
     # Read stderr for progress
     async def read_stderr():
         nonlocal last_update_time, last_reported_progress
+        thread_info_logged = False
         while True:
             line = await process.stderr.readline()
             if not line:
                 break
             line_str = line.decode('utf-8', errors='ignore').strip()
+            
+            # Log thread info from FFmpeg (appears early in output)
+            if not thread_info_logged and ('threads=' in line_str or 'Thread' in line_str or 'cpu capabilities' in line_str):
+                logger.info(f"FFmpeg info: {line_str}")
+                thread_info_logged = True
             
             # Parse progress
             if progress_callback and video_duration > 0:
