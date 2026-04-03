@@ -42,6 +42,9 @@ temp/*
 logs/
 *.log
 
+# Memory (session notes)
+memory/
+
 # OS
 .DS_Store
 Thumbs.db
