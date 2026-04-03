@@ -138,7 +138,7 @@ docker run -d --env-file .env --name circle-bot circle-overlay-bot
 
 **Настройка автодеплоя (Watch Paths):**
 
-В Dokploy → **Settings** → **Git** → **Watch Paths**:
+В Dokploy → **Project** → **General** → **Provider** → **Watch Paths**:
 
 ```
 bot/**,Dockerfile,docker-compose.yml,requirements.txt
