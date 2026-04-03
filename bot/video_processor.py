@@ -199,10 +199,26 @@ async def process_video_async(
                 break
             line_str = line.decode('utf-8', errors='ignore').strip()
             
-            # Log thread/cpu info from FFmpeg
-            if 'threads=' in line_str or 'Thread' in line_str or 'cpu capabilities' in line_str or 'frame=' not in line_str:
-                if '[libx264' in line_str or '[h264' in line_str or 'encoded' in line_str:
-                    logger.info(f"FFmpeg: {line_str}")
+            # Log thread/cpu info from FFmpeg (compact format)
+            if '[libx264' in line_str or 'encoded' in line_str:
+                if 'cpu capabilities' in line_str:
+                    # Extract CPU capabilities
+                    caps = line_str.split('cpu capabilities:')[-1].strip()
+                    logger.info(f"FFmpeg CPU: {caps}")
+                elif 'threads=' in line_str:
+                    # Extract threads count and key options
+                    import re
+                    threads_match = re.search(r'threads=(\d+)', line_str)
+                    lookahead_match = re.search(r'lookahead_threads=(\d+)', line_str)
+                    crf_match = re.search(r'crf=([\d.]+)', line_str)
+                    
+                    threads = threads_match.group(1) if threads_match else '?'
+                    lookahead = lookahead_match.group(1) if lookahead_match else '?'
+                    crf = crf_match.group(1) if crf_match else '?'
+                    
+                    logger.info(f"FFmpeg config: threads={threads} (lookahead={lookahead}), CRF={crf}")
+                elif 'profile' in line_str:
+                    logger.info(f"FFmpeg: {line_str[line_str.find('profile'):]}")
             
             # Parse progress
             if progress_callback and video_duration > 0:
