@@ -21,8 +21,7 @@ services:
       - BRIGHTNESS_ADJUST=${BRIGHTNESS_ADJUST:--0.15}
       - CONTRAST_ADJUST=${CONTRAST_ADJUST:-1.1}
       - FFMPEG_THREADS=${FFMPEG_THREADS:-0}
-    volumes:
-      - ./temp:/app/temp
+    # Note: temp directory is created inside container, not persisted
     healthcheck:
       test: ["CMD", "pgrep", "-f", "python -m bot"]
       interval: 30s
