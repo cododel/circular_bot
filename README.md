@@ -136,11 +136,18 @@ docker run -d --env-file .env --name circle-bot circle-overlay-bot
 5. Добавь Environment Variables из `.env`
 6. **Deploy**
 
+**Настройка автодеплоя (Watch Paths):**
+- В настройках сервиса Dokploy → **Git** → **Watch Paths**
+- Добавь: `bot/` (отслеживать изменения в коде)
+- Или оставь пустым — тогда деплой при любом push в `master`
+- **Auto Deploy**: включить
+
 При каждом push в `master` Dokploy автоматически пересоберёт и redeploy'ит бота.
 
-**Рекомендации:**
-- Установи **Health Check** в настройках сервиса
-- Добавь **Persistent Storage** для `/app/temp` если нужно сохранять логи между рестартами
+**Проверка лимитов CPU:**
+Если обработка видео длится >30 секунд:
+- **Resources** → **CPU Limit**: увеличь (например, `2000m` = 2 ядра)
+- **Memory Limit**: минимум `512MB`, рекомендуется `1GB`
 
 ## Тестирование
 
