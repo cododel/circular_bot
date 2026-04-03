@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: circle-overlay-bot
+    restart: unless-stopped
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - ADMIN_ID=${ADMIN_ID}
+      - ALLOW_USER_IDS=${ALLOW_USER_IDS:-}
+      - PROCESSING_TIMEOUT=${PROCESSING_TIMEOUT:-480}
+      - PROGRESS_UPDATE_INTERVAL=${PROGRESS_UPDATE_INTERVAL:-3}
+      - ZOOM_SCALE=${ZOOM_SCALE:-1.08}
+      - CIRCLE_SIZE_RATIO=${CIRCLE_SIZE_RATIO:-0.82}
+      - BACKGROUND_BLUR=${BACKGROUND_BLUR:-40}
+      - TEXT_FONT_SIZE_RATIO=${TEXT_FONT_SIZE_RATIO:-0.035}
+      - TEXT_PADDING_RATIO=${TEXT_PADDING_RATIO:-0.02}
+      - BRIGHTNESS_ADJUST=${BRIGHTNESS_ADJUST:--0.15}
+      - CONTRAST_ADJUST=${CONTRAST_ADJUST:-1.1}
+    volumes:
+      - ./temp:/app/temp
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "python -m bot"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s

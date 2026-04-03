@@ -101,13 +101,30 @@ python -m bot
 
 ## Docker
 
+### Локально
+
 ```bash
 # Сборка
 docker build -t circle-overlay-bot .
 
-# Запуск
+# Запуск (не забудь .env)
 docker run -d --env-file .env --name circle-bot circle-overlay-bot
 ```
+
+### Dokploy (автодеплой)
+
+1. В Dokploy: **Create Service** → **GitHub**
+2. Выбери репозиторий `cododel/circular_bot`
+3. Укажи branch: `master`
+4. Build type: `Dockerfile` (или `docker-compose.yml`)
+5. Добавь Environment Variables из `.env`
+6. **Deploy**
+
+При каждом push в `master` Dokploy автоматически пересоберёт и redeploy'ит бота.
+
+**Рекомендации:**
+- Установи **Health Check** в настройках сервиса
+- Добавь **Persistent Storage** для `/app/temp` если нужно сохранять логи между рестартами
 
 ## Тестирование
 
