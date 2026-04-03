@@ -92,8 +92,24 @@ cp .env.example .env
 | `TEXT_PADDING_RATIO` | Отступ текста от кружка | 0.02 |
 | `BRIGHTNESS_ADJUST` | Яркость фона | -0.15 |
 | `CONTRAST_ADJUST` | Контраст фона | 1.1 |
+| `FFMPEG_THREADS` | Потоки FFmpeg (0=авто) | 0 |
 
-### 4. Запуск
+### Оптимизация производительности
+
+Если обработка длится дольше 30 секунд:
+
+| Проблема | Решение | ENV |
+|----------|---------|-----|
+| Медленный blur | Уменьшить силу размытия | `BACKGROUND_BLUR=20` |
+| Большой zoom | Уменьшить масштаб | `ZOOM_SCALE=1.05` |
+| Много потоков (overhead) | Ограничить до 4-6 | `FFMPEG_THREADS=4` |
+| Docker лимит CPU | Проверить лимиты в Dokploy | — |
+
+**Рекомендуемые для скорости:**
+```bash
+BACKGROUND_BLUR=20
+FFMPEG_THREADS=4
+```
 
 ```bash
 python -m bot

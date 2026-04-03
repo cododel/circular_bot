@@ -129,6 +129,10 @@ async def process_video_async(
     Process video note to target aspect ratio with black background and overlay.
     Async version with progress tracking.
     """
+    import time
+    start_time = time.time()
+    logger.info(f"Starting video processing: {input_path} -> {output_path} ({target_size[0]}x{target_size[1]})")
+    
     width, height = target_size
     
     # Create overlays
@@ -258,6 +262,8 @@ async def process_video_async(
             except Exception:
                 pass
         
+        elapsed = time.time() - start_time
+        logger.info(f"Video processing completed in {elapsed:.1f}s")
         return output_path
         
     except asyncio.TimeoutError:
