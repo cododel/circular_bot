@@ -193,17 +193,16 @@ async def process_video_async(
     # Read stderr for progress
     async def read_stderr():
         nonlocal last_update_time, last_reported_progress
-        thread_info_logged = False
         while True:
             line = await process.stderr.readline()
             if not line:
                 break
             line_str = line.decode('utf-8', errors='ignore').strip()
             
-            # Log thread info from FFmpeg (appears early in output)
-            if not thread_info_logged and ('threads=' in line_str or 'Thread' in line_str or 'cpu capabilities' in line_str):
-                logger.info(f"FFmpeg info: {line_str}")
-                thread_info_logged = True
+            # Log thread/cpu info from FFmpeg
+            if 'threads=' in line_str or 'Thread' in line_str or 'cpu capabilities' in line_str or 'frame=' not in line_str:
+                if '[libx264' in line_str or '[h264' in line_str or 'encoded' in line_str:
+                    logger.info(f"FFmpeg: {line_str}")
             
             # Parse progress
             if progress_callback and video_duration > 0:
