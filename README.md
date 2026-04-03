@@ -137,10 +137,28 @@ docker run -d --env-file .env --name circle-bot circle-overlay-bot
 6. **Deploy**
 
 **Настройка автодеплоя (Watch Paths):**
-- В настройках сервиса Dokploy → **Git** → **Watch Paths**
-- Добавь: `bot/` (отслеживать изменения в коде)
-- Или оставь пустым — тогда деплой при любом push в `master`
-- **Auto Deploy**: включить
+
+В Dokploy → **Settings** → **Git** → **Watch Paths**:
+
+```
+bot/**,Dockerfile,docker-compose.yml,requirements.txt
+```
+
+Или через запятую в одну строку:
+```
+bot/**,Dockerfile,docker-compose.yml,requirements.txt,.dockerignore
+```
+
+**Что отслеживать:**
+- `bot/**` — весь код бота (включая подпапки)
+- `Dockerfile` — изменения в сборке
+- `docker-compose.yml` — конфигурация сервиса и ресурсы
+- `requirements.txt` — обновление зависимостей
+- `.dockerignore` — правила игнорирования файлов
+
+**Auto Deploy:** включить
+
+При каждом push в `master` Dokploy автоматически пересоберёт и redeploy'ит бота.
 
 При каждом push в `master` Dokploy автоматически пересоберёт и redeploy'ит бота.
 
