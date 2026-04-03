@@ -22,6 +22,14 @@ services:
       - CONTRAST_ADJUST=${CONTRAST_ADJUST:-1.1}
       - FFMPEG_THREADS=${FFMPEG_THREADS:-0}
     # Note: temp directory is created inside container, not persisted
+    deploy:
+      resources:
+        limits:
+          cpus: '2'      # 2 CPU cores (increase if needed)
+          memory: 1G     # 1GB RAM
+        reservations:
+          cpus: '1'
+          memory: 512M
     healthcheck:
       test: ["CMD", "pgrep", "-f", "python -m bot"]
       interval: 30s

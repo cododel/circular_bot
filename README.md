@@ -146,8 +146,19 @@ docker run -d --env-file .env --name circle-bot circle-overlay-bot
 
 **Проверка лимитов CPU:**
 Если обработка видео длится >30 секунд:
+
+**Для Dockerfile deployment:**
 - **Resources** → **CPU Limit**: увеличь (например, `2000m` = 2 ядра)
-- **Memory Limit**: минимум `512MB`, рекомендуется `1GB`
+
+**Для Docker Compose:**
+- Редактируй `docker-compose.yml` → секция `deploy.resources`:
+```yaml
+deploy:
+  resources:
+    limits:
+      cpus: '2'      # Увеличь до 2-4
+      memory: 1G
+```
 
 ## Тестирование
 
