@@ -25,6 +25,9 @@ TEXT_PADDING_RATIO = float(os.getenv("TEXT_PADDING_RATIO", "0.02"))  # text padd
 BRIGHTNESS_ADJUST = float(os.getenv("BRIGHTNESS_ADJUST", "-0.15"))  # background brightness
 CONTRAST_ADJUST = float(os.getenv("CONTRAST_ADJUST", "1.1"))  # background contrast
 
+# Performance settings
+FFMPEG_THREADS = int(os.getenv("FFMPEG_THREADS", "0"))  # 0 = auto (use all cores), or specify number
+
 TEMP_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "temp")
 os.makedirs(TEMP_DIR, exist_ok=True)
 

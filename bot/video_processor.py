@@ -9,7 +9,7 @@ from bot.config import (
     TEMP_DIR, PROCESSING_TIMEOUT, PROGRESS_UPDATE_INTERVAL,
     ZOOM_SCALE, CIRCLE_SIZE_RATIO, BACKGROUND_BLUR,
     TEXT_FONT_SIZE_RATIO, TEXT_PADDING_RATIO,
-    BRIGHTNESS_ADJUST, CONTRAST_ADJUST
+    BRIGHTNESS_ADJUST, CONTRAST_ADJUST, FFMPEG_THREADS
 )
 
 
@@ -152,6 +152,13 @@ async def process_video_async(
     cmd = [
         "ffmpeg",
         "-y",
+    ]
+    
+    # Add threads if specified (0 = auto, >0 = specific count)
+    if FFMPEG_THREADS > 0:
+        cmd.extend(["-threads", str(FFMPEG_THREADS)])
+    
+    cmd.extend([
         "-progress", "pipe:2",  # Output progress to stderr
         "-i", input_path,
         "-i", text_overlay,
@@ -165,7 +172,7 @@ async def process_video_async(
         "-b:a", "128k",
         "-movflags", "+faststart",
         output_path
-    ]
+    ])
     
     # Start FFmpeg process
     process = await asyncio.create_subprocess_exec(

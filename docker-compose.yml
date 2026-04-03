@@ -20,6 +20,7 @@ services:
       - TEXT_PADDING_RATIO=${TEXT_PADDING_RATIO:-0.02}
       - BRIGHTNESS_ADJUST=${BRIGHTNESS_ADJUST:--0.15}
       - CONTRAST_ADJUST=${CONTRAST_ADJUST:-1.1}
+      - FFMPEG_THREADS=${FFMPEG_THREADS:-0}
     volumes:
       - ./temp:/app/temp
     healthcheck:
