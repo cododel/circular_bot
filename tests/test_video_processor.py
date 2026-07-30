@@ -21,6 +21,7 @@ from bot.config import (
     ASPECT_RATIOS,
     CIRCLE_SIZE_RATIO,
     LOCAL_BACKGROUND_OPACITY,
+    LOCAL_BACKGROUND_SIZE_RATIO,
     TEXT_ARC_MAX_SPAN_DEG,
     TEXT_FONT_SIZE_RATIO,
     TEXT_FRAME_MARGIN_RATIO,
@@ -263,6 +264,40 @@ def test_regular_video_keeps_using_the_whole_frame() -> None:
 
     assert "crop=iw*" not in graph
     assert "[circle_src]scale=590:590:" in graph
+
+
+def test_regular_video_backdrop_is_scaled_exactly_like_the_circle() -> None:
+    """A backdrop at another zoom steps visibly at the circle edge."""
+    width, height, circle_size = 720, 1280, 590
+
+    assert video_processor._local_backdrop_size(width, height, circle_size) == circle_size
+
+    graph = video_processor._build_filter_complex(width, height, circle_size)
+
+    # Same scale and same crop, so the blurred corners continue the sharp
+    # circle content across the edge instead of jumping to a different zoom.
+    assert f"[local_src]scale={circle_size}:{circle_size}:" in graph
+    assert f"[circle_src]scale={circle_size}:{circle_size}:" in graph
+    assert graph.count(f"crop={circle_size}:{circle_size},") == 2
+
+    # ...and both land on the same spot, so the square is flush with the circle.
+    x = (width - circle_size) // 2
+    y = (height - circle_size) // 2
+    assert graph.count(f"overlay={x}:{y}:") == 2
+
+
+def test_video_note_halo_still_extends_past_the_circle() -> None:
+    """The round halo is only visible where it reaches beyond the circle."""
+    circle_size = 590
+    size = video_processor._local_backdrop_size(
+        720,
+        1280,
+        circle_size,
+        video_processor.VIDEO_NOTE_KIND,
+    )
+
+    assert size > circle_size
+    assert size == pytest.approx(circle_size * LOCAL_BACKGROUND_SIZE_RATIO, abs=2)
 
 
 def test_video_note_backdrop_mask_is_round(tmp_path: Path) -> None:

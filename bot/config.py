@@ -42,7 +42,11 @@ AMBIENT_SMOOTHING_ALPHA = float(os.getenv("AMBIENT_SMOOTHING_ALPHA", "0.25"))
 BRIGHTNESS_ADJUST = float(os.getenv("BRIGHTNESS_ADJUST", "-0.24"))
 CONTRAST_ADJUST = float(os.getenv("CONTRAST_ADJUST", "1.05"))
 
-# Weakly blurred square immediately behind the clear circle.
+# Weakly blurred backdrop immediately behind the clear circle. On a regular
+# video it is a square at the circle diameter, so it is scaled exactly like the
+# circle and its corners continue that content flush across the edge; the ratio
+# below does not apply there. Video notes get a round halo instead, and it only
+# reads if it extends past the circle — that is what the ratio sizes.
 LOCAL_BACKGROUND_SIZE_RATIO = float(os.getenv("LOCAL_BACKGROUND_SIZE_RATIO", "1.14"))
 LOCAL_BACKGROUND_BLUR = float(os.getenv("LOCAL_BACKGROUND_BLUR", "7"))
 LOCAL_BACKGROUND_BRIGHTNESS = float(os.getenv("LOCAL_BACKGROUND_BRIGHTNESS", "-0.10"))

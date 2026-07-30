@@ -560,7 +560,26 @@ async def probe_duration(path: str) -> float:
     return duration if math.isfinite(duration) and duration > 0 else 0.0
 
 
-def _local_backdrop_size(width: int, height: int, circle_size: int) -> int:
+def _local_backdrop_size(
+    width: int,
+    height: int,
+    circle_size: int,
+    source_kind: str = "video",
+) -> int:
+    """Side of the backdrop layer sitting directly behind the clear circle.
+
+    A regular video keeps it at the circle diameter. The backdrop is then
+    scaled exactly like the circle layer, so its blurred corners continue the
+    sharp circle content straight across the edge instead of stepping to a
+    different zoom, and the square meets the circle flush at the four tangent
+    points.
+
+    A video note draws a round halo instead, which only reads if it extends
+    past the circle — hence the ratio.
+    """
+    if source_kind != VIDEO_NOTE_KIND:
+        return circle_size
+
     maximum = _even(min(width, height))
     requested = _even(circle_size * LOCAL_BACKGROUND_SIZE_RATIO)
     return max(circle_size, min(requested, maximum))
@@ -604,7 +623,7 @@ def _build_filter_complex(
     background layers are sampled from inside the source circle only. Ordinary
     videos keep using the whole frame.
     """
-    backdrop_size = _local_backdrop_size(width, height, circle_size)
+    backdrop_size = _local_backdrop_size(width, height, circle_size, source_kind)
     map_width, map_height = _ambient_map_size(width, height)
     zoom_width = _even(map_width * max(1.0, ZOOM_SCALE), minimum=16)
     zoom_height = _even(map_height * max(1.0, ZOOM_SCALE), minimum=16)
@@ -699,7 +718,12 @@ async def process_video_async(
         circle_mask = create_circle_mask(circle_size)
         generated_files.append(circle_mask)
 
-        backdrop_size = _local_backdrop_size(width, height, circle_size)
+        backdrop_size = _local_backdrop_size(
+            width,
+            height,
+            circle_size,
+            source_kind,
+        )
         local_mask = create_local_backdrop_mask(backdrop_size, source_kind)
         generated_files.append(local_mask)
 
