@@ -4,7 +4,28 @@
 
 **Статус**: MVP работает, основные доработки завершены
 
-**Последние изменения (2026-07-30)**:
+**Последние изменения (2026-07-30, ambient)**:
+- ✓ **YouTube-like ambient** — кадр → маленькая цветовая карта (96px) → временное
+  сглаживание → размытие → досыщение → растягивание на холст
+  - `AMBIENT_MAP_WIDTH` / `AMBIENT_BLUR_SIGMA` / `AMBIENT_SATURATION`
+  - Временное сглаживание = EMA через `tmix` с экспоненциальными весами
+    (`AMBIENT_SMOOTHING_FRAMES`, `AMBIENT_SMOOTHING_ALPHA`)
+  - `tmix` упорядочивает веса от старого кадра к новому — проверено на ffmpeg,
+    число кадров на выходе не меняется
+  - Апскейл карты — `flags=bicubic`, а не lanczos: на гладком цветовом поле
+    резкие ядра дают ringing
+- ✓ **Разведены пути кружка и обычного видео** — `source_kind` прокинут из
+  `handlers.py` в `process_video_async()` → `_build_filter_complex()`
+  - Кружок: Telegram запекает белую круглую маску в файл, поэтому ambient и
+    подложка берутся из вписанного в круг квадрата (`VIDEO_NOTE_SAFE_CROP=0.70`,
+    должен быть ≤ 1/√2), видимый круг зумится на `VIDEO_NOTE_EDGE_TRIM=0.985`,
+    чтобы срезать сглаженную кайму маски
+  - Кружок: подложка круглая (`create_soft_circle_mask`) — квадратная рисовала
+    ровно тот белый силуэт, который убираем
+  - Обычное видео: как раньше, весь кадр
+- ✗ **Убраны** `BACKGROUND_BLUR` и `AMBIENT_DOWNSCALE` — заменены на `AMBIENT_*`
+
+**Предыдущие изменения (2026-07-30)**:
 - ✓ **Поддержка обычных видео** — принимаются `video_note`, `video` и документы с `video/*` mime
   - Обычное видео маскируется тем же пайплайном: центральный квадрат → круг
   - `extract_video_source()` в `handlers.py` нормализует любой из трёх типов вложения
@@ -55,9 +76,12 @@
 
 ### FFmpeg Pipeline (Async)
 ```
-Input → Split → [Blurred BG] + [Cropped Circle] + [Text Overlay] → Output
-                    ↓
-         Progress parsing (stderr) → 10% increments
+Input → Split=3 → [Ambient] + [Backdrop] + [Clear Circle] → + [Text Overlay] → Output
+                     ↓
+         Progress parsing (stderr) → PROGRESS_UPDATE_INTERVAL
+
+Ambient: [safe crop] → scale 96px map → tmix (EMA) → gblur → eq → scale up
+                        ↑ video note only
 ```
 
 ### Key Functions
@@ -104,8 +128,13 @@ Input → Split → [Blurred BG] + [Cropped Circle] + [Text Overlay] → Output
 ## Notes
 
 - Кружок Telegram всегда 1:1, 240×240 до 640×640
+- **В файле кружка за пределами вписанного круга только белая маска Telegram** —
+  использовать эти пиксели нельзя ни в одном производном слое
 - Обычное видео любого соотношения сторон обрезается по центру в квадрат
-  (`force_original_aspect_ratio=increase` + `crop`) — граф фильтров не менялся
+  (`force_original_aspect_ratio=increase` + `crop`)
+- Сброса сглаживания на смене сцены нет: `tmix` усредняет соседние кадры без
+  детектора. Для говорящей головы в кружке склеек нет, так что не мешает.
+  Точный EMA со сбросом потребовал бы Python/OpenCV-пайплайна вместо FFmpeg
 - Bot API отдаёт ботам файлы до 20 МБ; лимит проверяется до скачивания
 - Выходное видео — H.264 + AAC
 - Временные файлы очищаются после обработки

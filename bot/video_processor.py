@@ -15,8 +15,11 @@ from typing import Awaitable, Callable, Optional, Tuple
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 from bot.config import (
-    AMBIENT_DOWNSCALE,
-    BACKGROUND_BLUR,
+    AMBIENT_BLUR_SIGMA,
+    AMBIENT_MAP_WIDTH,
+    AMBIENT_SATURATION,
+    AMBIENT_SMOOTHING_ALPHA,
+    AMBIENT_SMOOTHING_FRAMES,
     BRIGHTNESS_ADJUST,
     CIRCLE_SIZE_RATIO,
     CONTRAST_ADJUST,
@@ -38,6 +41,8 @@ from bot.config import (
     TEXT_MIN_TRACKING_RATIO,
     TEXT_PADDING_RATIO,
     TEXT_TRACKING_RATIO,
+    VIDEO_NOTE_EDGE_TRIM,
+    VIDEO_NOTE_SAFE_CROP,
     ZOOM_SCALE,
 )
 
@@ -49,6 +54,10 @@ _BICUBIC = _RESAMPLING.BICUBIC
 _TEXT_RENDER_SCALE = 3
 _MASK_RENDER_SCALE = 4
 _PROBE_TIMEOUT = 30
+
+# Telegram bakes a white round mask into video notes, so they need their own
+# sampling rules. Everything else is treated as an ordinary rectangular video.
+VIDEO_NOTE_KIND = "video_note"
 
 
 @dataclass(frozen=True)
@@ -437,6 +446,41 @@ def create_soft_square_mask(size: int, output_path: Optional[str] = None) -> str
     return output_path
 
 
+def create_soft_circle_mask(size: int, output_path: Optional[str] = None) -> str:
+    """Create a softly feathered round mask for the local background layer.
+
+    A video note is round, so a square backdrop would draw a square silhouette
+    around it — exactly the shape Telegram's own white mask leaves behind. The
+    circular halo fades into the ambient layer instead.
+    """
+    if output_path is None:
+        output_path = _temporary_png_path("local_mask")
+
+    size = _even(size)
+    opacity = max(0.0, min(1.0, LOCAL_BACKGROUND_OPACITY))
+    maximum = int(round(255 * opacity))
+    feather = max(2, int(round(size * LOCAL_BACKGROUND_FEATHER_RATIO)))
+
+    mask = Image.new("L", (size, size), 0)
+    draw = ImageDraw.Draw(mask)
+    inset = max(1, feather)
+    draw.ellipse((inset, inset, size - inset - 1, size - inset - 1), fill=maximum)
+    mask = mask.filter(ImageFilter.GaussianBlur(radius=max(1.0, feather / 2.0)))
+    mask.save(output_path)
+    return output_path
+
+
+def create_local_backdrop_mask(
+    size: int,
+    source_kind: str,
+    output_path: Optional[str] = None,
+) -> str:
+    """Pick the backdrop silhouette that matches the source geometry."""
+    if source_kind == VIDEO_NOTE_KIND:
+        return create_soft_circle_mask(size, output_path)
+    return create_soft_square_mask(size, output_path)
+
+
 def parse_ffmpeg_progress(line: str, duration: float) -> Optional[float]:
     """Parse FFmpeg log or ``-progress`` output into a percentage."""
     if duration <= 0:
@@ -516,48 +560,99 @@ async def probe_duration(path: str) -> float:
     return duration if math.isfinite(duration) and duration > 0 else 0.0
 
 
-def _local_square_size(width: int, height: int, circle_size: int) -> int:
+def _local_backdrop_size(width: int, height: int, circle_size: int) -> int:
     maximum = _even(min(width, height))
     requested = _even(circle_size * LOCAL_BACKGROUND_SIZE_RATIO)
     return max(circle_size, min(requested, maximum))
 
 
-def _build_filter_complex(width: int, height: int, circle_size: int) -> str:
-    square_size = _local_square_size(width, height, circle_size)
+def _ambient_map_size(width: int, height: int) -> Tuple[int, int]:
+    """Size of the tiny colour map, keeping the output aspect ratio."""
+    map_width = _even(max(16, AMBIENT_MAP_WIDTH), minimum=16)
+    map_height = _even(map_width * height / width, minimum=16)
+    return map_width, map_height
 
-    ambient_scale = max(0.10, min(1.0, AMBIENT_DOWNSCALE))
-    ambient_width = _even(width * ambient_scale)
-    ambient_height = _even(height * ambient_scale)
-    zoom_width = _even(ambient_width * max(1.0, ZOOM_SCALE))
-    zoom_height = _even(ambient_height * max(1.0, ZOOM_SCALE))
-    ambient_sigma = max(0.1, BACKGROUND_BLUR * ambient_scale)
+
+def _ambient_smoothing_filter() -> str:
+    """Build the ``tmix`` pass that smooths the colour map over time.
+
+    ``tmix`` orders its weights oldest to newest, so an exponential ramp makes
+    the current frame dominate while older ones decay by ``1 - alpha`` per
+    step. That approximates ``A_t = alpha * B_t + (1 - alpha) * A_(t-1)`` over
+    a finite window, which is cheap here because the map is only ~96px wide.
+    """
+    frames = max(1, AMBIENT_SMOOTHING_FRAMES)
+    if frames < 2:
+        return ""
+
+    decay = max(0.0, min(0.99, 1.0 - AMBIENT_SMOOTHING_ALPHA))
+    weights = " ".join(
+        f"{decay ** (frames - 1 - index):.5f}" for index in range(frames)
+    )
+    return f"tmix=frames={frames}:weights='{weights}',"
+
+
+def _build_filter_complex(
+    width: int,
+    height: int,
+    circle_size: int,
+    source_kind: str = "video",
+) -> str:
+    """Compose the ambient, backdrop, clear-circle and signature layers.
+
+    Video notes arrive with Telegram's white round mask baked in, so their
+    background layers are sampled from inside the source circle only. Ordinary
+    videos keep using the whole frame.
+    """
+    backdrop_size = _local_backdrop_size(width, height, circle_size)
+    map_width, map_height = _ambient_map_size(width, height)
+    zoom_width = _even(map_width * max(1.0, ZOOM_SCALE), minimum=16)
+    zoom_height = _even(map_height * max(1.0, ZOOM_SCALE), minimum=16)
+
+    if source_kind == VIDEO_NOTE_KIND:
+        # The corners hold nothing but Telegram's white mask; take the largest
+        # square that fits inside the circle. Video notes are always square, so
+        # a relative crop lands exactly on it whatever the source resolution.
+        safe_crop = max(0.05, min(1.0, VIDEO_NOTE_SAFE_CROP))
+        inner_crop = f"crop=iw*{safe_crop:.4f}:ih*{safe_crop:.4f},"
+        # Zoom past the antialiased rim of that baked mask before cutting the
+        # visible circle, so no pale outline survives.
+        edge_trim = max(0.5, min(1.0, VIDEO_NOTE_EDGE_TRIM))
+        circle_source = _even(circle_size / edge_trim)
+    else:
+        inner_crop = ""
+        circle_source = circle_size
 
     circle_x = (width - circle_size) // 2
     circle_y = (height - circle_size) // 2
-    square_x = (width - square_size) // 2
-    square_y = (height - square_size) // 2
+    backdrop_x = (width - backdrop_size) // 2
+    backdrop_y = (height - backdrop_size) // 2
 
     return (
         "[0:v]split=3[ambient_src][local_src][circle_src];"
-        f"[ambient_src]scale={zoom_width}:{zoom_height}:"
+        f"[ambient_src]{inner_crop}scale={zoom_width}:{zoom_height}:"
         "force_original_aspect_ratio=increase,"
-        f"crop={ambient_width}:{ambient_height},"
-        f"gblur=sigma={ambient_sigma:.3f}:steps=2,"
-        f"eq=brightness={BRIGHTNESS_ADJUST}:contrast={CONTRAST_ADJUST},"
-        f"scale={width}:{height}:flags=lanczos,setsar=1,format=yuv420p[ambient];"
-        f"[local_src]scale={square_size}:{square_size}:"
+        f"crop={map_width}:{map_height},"
+        f"{_ambient_smoothing_filter()}"
+        f"gblur=sigma={max(0.1, AMBIENT_BLUR_SIGMA):.3f}:steps=2,"
+        f"eq=saturation={AMBIENT_SATURATION}:"
+        f"brightness={BRIGHTNESS_ADJUST}:contrast={CONTRAST_ADJUST},"
+        # Bicubic, not lanczos: the map is already a smooth colour field and
+        # sharpening kernels only ring on it.
+        f"scale={width}:{height}:flags=bicubic,setsar=1,format=yuv420p[ambient];"
+        f"[local_src]{inner_crop}scale={backdrop_size}:{backdrop_size}:"
         "force_original_aspect_ratio=increase,"
-        f"crop={square_size}:{square_size},"
+        f"crop={backdrop_size}:{backdrop_size},"
         f"gblur=sigma={max(0.1, LOCAL_BACKGROUND_BLUR):.3f}:steps=1,"
         f"eq=brightness={LOCAL_BACKGROUND_BRIGHTNESS}:"
         f"contrast={LOCAL_BACKGROUND_CONTRAST},"
         "setsar=1,format=rgba[local_base];"
         "[local_base][3:v]alphamerge[local];"
-        f"[circle_src]scale={circle_size}:{circle_size}:"
+        f"[circle_src]scale={circle_source}:{circle_source}:"
         "force_original_aspect_ratio=increase,"
         f"crop={circle_size}:{circle_size},setsar=1,format=rgba[circle_base];"
         "[circle_base][2:v]alphamerge[circle];"
-        f"[ambient][local]overlay={square_x}:{square_y}:"
+        f"[ambient][local]overlay={backdrop_x}:{backdrop_y}:"
         "format=auto:eof_action=repeat[ambient_local];"
         f"[ambient_local][circle]overlay={circle_x}:{circle_y}:"
         "format=auto:eof_action=repeat[video];"
@@ -573,18 +668,20 @@ async def process_video_async(
     overlay_text: str = "",
     progress_callback: Optional[Callable[[int], Awaitable[None]]] = None,
     video_duration: float = 0.0,
+    source_kind: str = "video",
 ) -> str:
-    """Render the ambient, local-square, clear-circle and arc-text layers."""
+    """Render the ambient, backdrop, clear-circle and arc-text layers."""
     started_at = time.time()
     width, height = target_size
     circle_size = _even(min(width, height) * CIRCLE_SIZE_RATIO)
 
     logger.info(
-        "Starting video processing: %s -> %s (%sx%s)",
+        "Starting video processing: %s -> %s (%sx%s, kind=%s)",
         input_path,
         output_path,
         width,
         height,
+        source_kind,
     )
 
     generated_files: list[str] = []
@@ -602,11 +699,16 @@ async def process_video_async(
         circle_mask = create_circle_mask(circle_size)
         generated_files.append(circle_mask)
 
-        square_size = _local_square_size(width, height, circle_size)
-        local_mask = create_soft_square_mask(square_size)
+        backdrop_size = _local_backdrop_size(width, height, circle_size)
+        local_mask = create_local_backdrop_mask(backdrop_size, source_kind)
         generated_files.append(local_mask)
 
-        filter_complex = _build_filter_complex(width, height, circle_size)
+        filter_complex = _build_filter_complex(
+            width,
+            height,
+            circle_size,
+            source_kind,
+        )
 
         cmd = ["ffmpeg", "-y"]
         if FFMPEG_THREADS > 0:
