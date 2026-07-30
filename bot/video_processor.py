@@ -1,120 +1,459 @@
 """Video processing with FFmpeg (async version)."""
-import os
+from __future__ import annotations
+
 import asyncio
-import re
-import math
-import time
+from collections import deque
+from dataclasses import dataclass
 import logging
-from typing import Tuple, Callable, Optional
-from PIL import Image, ImageDraw, ImageFont
+import math
+import os
+import re
+import tempfile
+import time
+from typing import Awaitable, Callable, Optional, Tuple
+
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
+
 from bot.config import (
-    TEMP_DIR, PROCESSING_TIMEOUT, PROGRESS_UPDATE_INTERVAL,
-    ZOOM_SCALE, CIRCLE_SIZE_RATIO, BACKGROUND_BLUR,
-    TEXT_FONT_SIZE_RATIO, TEXT_PADDING_RATIO,
-    BRIGHTNESS_ADJUST, CONTRAST_ADJUST, FFMPEG_THREADS
+    AMBIENT_DOWNSCALE,
+    BACKGROUND_BLUR,
+    BRIGHTNESS_ADJUST,
+    CIRCLE_SIZE_RATIO,
+    CONTRAST_ADJUST,
+    FFMPEG_THREADS,
+    LOCAL_BACKGROUND_BLUR,
+    LOCAL_BACKGROUND_BRIGHTNESS,
+    LOCAL_BACKGROUND_CONTRAST,
+    LOCAL_BACKGROUND_FEATHER_RATIO,
+    LOCAL_BACKGROUND_OPACITY,
+    LOCAL_BACKGROUND_SIZE_RATIO,
+    PROCESSING_TIMEOUT,
+    PROGRESS_UPDATE_INTERVAL,
+    TEMP_DIR,
+    TEXT_ARC_END_DEG,
+    TEXT_ARC_MAX_SPAN_DEG,
+    TEXT_FONT_SIZE_RATIO,
+    TEXT_MIN_FONT_SIZE_RATIO,
+    TEXT_MIN_TRACKING_RATIO,
+    TEXT_PADDING_RATIO,
+    TEXT_TRACKING_RATIO,
+    ZOOM_SCALE,
 )
 
 logger = logging.getLogger(__name__)
+
+_RESAMPLING = getattr(Image, "Resampling", Image)
+_LANCZOS = _RESAMPLING.LANCZOS
+_BICUBIC = _RESAMPLING.BICUBIC
+_TEXT_RENDER_SCALE = 3
+_MASK_RENDER_SCALE = 4
+
+
+@dataclass(frozen=True)
+class ArcTextLayout:
+    """Resolved curved-text geometry in output pixels."""
+
+    text: str
+    font_size: int
+    font_path: Optional[str]
+    path_radius: float
+    end_angle_deg: float
+    span_deg: float
+    tracking: float
+    advances: Tuple[float, ...]
+
+
+_FONT_PATHS = (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "/System/Library/Fonts/Helvetica.ttc",
+    "/Windows/Fonts/arial.ttf",
+)
+
+
+def _even(value: float, minimum: int = 2) -> int:
+    """Round a dimension down to a positive even integer."""
+    result = max(minimum, int(value))
+    return result if result % 2 == 0 else result - 1
+
+
+def _temporary_png_path(prefix: str) -> str:
+    """Reserve a unique PNG path inside TEMP_DIR."""
+    fd, path = tempfile.mkstemp(prefix=f"{prefix}_", suffix=".png", dir=TEMP_DIR)
+    os.close(fd)
+    return path
+
+
+def _resolve_font_path() -> Optional[str]:
+    for path in _FONT_PATHS:
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def _load_font(size: int, font_path: Optional[str] = None) -> ImageFont.ImageFont:
+    size = max(1, int(size))
+    resolved_path = font_path or _resolve_font_path()
+    if resolved_path:
+        try:
+            return ImageFont.truetype(resolved_path, size)
+        except (OSError, ValueError):
+            logger.warning("Failed to load font %s", resolved_path, exc_info=True)
+
+    try:
+        # Pillow 10.1+ supports a scalable default font.
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
+
+
+def _normalize_overlay_text(text: str) -> str:
+    """Curved text is single-line; collapse control whitespace safely."""
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
+def _glyph_advance(font: ImageFont.ImageFont, character: str) -> float:
+    try:
+        return max(0.0, float(font.getlength(character)))
+    except (AttributeError, TypeError):
+        bbox = font.getbbox(character)
+        return max(0.0, float(bbox[2] - bbox[0]))
+
+
+def _measure_arc_text(
+    text: str,
+    font: ImageFont.ImageFont,
+    tracking: float,
+) -> tuple[Tuple[float, ...], float]:
+    advances = tuple(_glyph_advance(font, character) for character in text)
+    total = sum(advances) + max(0, len(advances) - 1) * tracking
+    return advances, total
+
+
+def _layout_for_size(
+    text: str,
+    circle_size: int,
+    font_size: int,
+    font_path: Optional[str],
+    tracking: Optional[float] = None,
+) -> ArcTextLayout:
+    font = _load_font(font_size, font_path)
+    if tracking is None:
+        tracking = max(0.0, font_size * TEXT_TRACKING_RATIO)
+    advances, text_length = _measure_arc_text(text, font, tracking)
+
+    visible_radius = circle_size / 2.0
+    gap = circle_size * TEXT_PADDING_RATIO
+    # The path runs through glyph centres, keeping the complete glyph body
+    # outside the clear circle rather than putting its baseline on the edge.
+    path_radius = visible_radius + gap + font_size * 0.55
+    span_deg = math.degrees(text_length / path_radius) if path_radius else 0.0
+
+    return ArcTextLayout(
+        text=text,
+        font_size=font_size,
+        font_path=font_path,
+        path_radius=path_radius,
+        end_angle_deg=TEXT_ARC_END_DEG,
+        span_deg=span_deg,
+        tracking=tracking,
+        advances=advances,
+    )
+
+
+def fit_text_to_arc(text: str, circle_size: int) -> ArcTextLayout:
+    """Fit text to the lower-right circle arc by scaling and, last, ellipsis."""
+    normalized_text = _normalize_overlay_text(text)
+    font_path = _resolve_font_path()
+
+    max_font_size = max(8, int(round(circle_size * TEXT_FONT_SIZE_RATIO)))
+    min_font_size = max(8, int(round(circle_size * TEXT_MIN_FONT_SIZE_RATIO)))
+    min_font_size = min(min_font_size, max_font_size)
+
+    if not normalized_text:
+        return _layout_for_size("", circle_size, max_font_size, font_path)
+
+    maximum_span_radians = math.radians(TEXT_ARC_MAX_SPAN_DEG)
+
+    for font_size in range(max_font_size, min_font_size - 1, -1):
+        # Keep the airy tracking used by the reference design for short labels,
+        # but contract it before shrinking the font for long usernames/text.
+        preferred_tracking = max(0.0, font_size * TEXT_TRACKING_RATIO)
+        minimum_tracking = max(0.0, font_size * TEXT_MIN_TRACKING_RATIO)
+        base_layout = _layout_for_size(
+            normalized_text,
+            circle_size,
+            font_size,
+            font_path,
+            tracking=0.0,
+        )
+        glyph_length = sum(base_layout.advances)
+        capacity = base_layout.path_radius * maximum_span_radians
+        gap_count = max(0, len(normalized_text) - 1)
+
+        if gap_count == 0:
+            tracking = 0.0
+        else:
+            available_tracking = (capacity - glyph_length) / gap_count
+            if available_tracking < minimum_tracking:
+                continue
+            tracking = min(preferred_tracking, available_tracking)
+
+        return _layout_for_size(
+            normalized_text,
+            circle_size,
+            font_size,
+            font_path,
+            tracking=tracking,
+        )
+
+    # A custom label can still exceed the configured arc when this function is
+    # reused outside the 50-character UI limit. Preserve the beginning and make
+    # truncation explicit rather than rendering unreadably tiny text.
+    candidate = normalized_text
+    while len(candidate) > 1:
+        candidate = candidate[:-1].rstrip()
+        rendered = f"{candidate}…"
+        layout = _layout_for_size(
+            rendered,
+            circle_size,
+            min_font_size,
+            font_path,
+            tracking=min_font_size * TEXT_MIN_TRACKING_RATIO,
+        )
+        if layout.span_deg <= TEXT_ARC_MAX_SPAN_DEG:
+            return layout
+
+    return _layout_for_size("…", circle_size, min_font_size, font_path)
+
+
+def _render_glyph(
+    character: str,
+    font_size: int,
+    font_path: Optional[str],
+    rotation_deg: float,
+) -> Optional[Image.Image]:
+    """Render one rotated glyph with supersampling for clean tangents."""
+    if character.isspace():
+        return None
+
+    scale = _TEXT_RENDER_SCALE
+    font = _load_font(font_size * scale, font_path)
+    stroke_width = max(1, int(round(font_size * scale * 0.035)))
+
+    probe = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
+    probe_draw = ImageDraw.Draw(probe)
+    bbox = probe_draw.textbbox(
+        (0, 0),
+        character,
+        font=font,
+        stroke_width=stroke_width,
+    )
+    glyph_width = max(1, bbox[2] - bbox[0])
+    glyph_height = max(1, bbox[3] - bbox[1])
+    padding = max(6 * scale, stroke_width * 3)
+
+    glyph = Image.new(
+        "RGBA",
+        (glyph_width + padding * 2, glyph_height + padding * 2),
+        (0, 0, 0, 0),
+    )
+    draw = ImageDraw.Draw(glyph)
+    draw.text(
+        (padding - bbox[0], padding - bbox[1]),
+        character,
+        font=font,
+        fill=(255, 255, 255, 232),
+        stroke_width=stroke_width,
+        stroke_fill=(0, 0, 0, 65),
+    )
+
+    rotated = glyph.rotate(rotation_deg, expand=True, resample=_BICUBIC)
+    target_size = (
+        max(1, int(round(rotated.width / scale))),
+        max(1, int(round(rotated.height / scale))),
+    )
+    return rotated.resize(target_size, _LANCZOS)
 
 
 def create_text_overlay(
     width: int,
     height: int,
     text: str = "",
-    output_path: str = None,
-    circle_size: int = None
+    output_path: Optional[str] = None,
+    circle_size: Optional[int] = None,
 ) -> str:
-    """Create PNG with text overlay at bottom-right of the circle."""
+    """Create a transparent PNG with a fitted lower-right arc signature."""
     if output_path is None:
-        output_path = os.path.join(TEMP_DIR, f"overlay_{width}x{height}.png")
-    
-    # Create transparent image
-    img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-    
-    # Try to use a nice font, fallback to default
-    try:
-        font_paths = [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-            "/System/Library/Fonts/Helvetica.ttc",
-            "/Windows/Fonts/arial.ttf",
-        ]
-        font = None
-        for fp in font_paths:
-            if os.path.exists(fp):
-                font = ImageFont.truetype(fp, int(height * TEXT_FONT_SIZE_RATIO))
-                break
-        if font is None:
-            font = ImageFont.load_default()
-    except Exception:
-        font = ImageFont.load_default()
-    
-    # Circle position
+        output_path = _temporary_png_path("text_overlay")
+
     if circle_size is None:
-        circle_size = min(width, height) * CIRCLE_SIZE_RATIO
-    
-    circle_right = (width + circle_size) // 2
-    circle_bottom = (height + circle_size) // 2
-    
-    # Measure text width
-    bbox = draw.textbbox((0, 0), text, font=font)
-    text_width = bbox[2] - bbox[0]
-    text_height = bbox[3] - bbox[1]
-    
-    # Text position: bottom-right, but keep within video bounds
-    padding = int(height * TEXT_PADDING_RATIO)
-    text_x = min(circle_right + padding, width - text_width - padding)
-    text_y = circle_bottom - padding
-    
-    # Draw text with shadow
-    draw.text((text_x + 2, text_y + 2), text, font=font, fill=(0, 0, 0, 180))
-    draw.text((text_x, text_y), text, font=font, fill=(255, 255, 255, 230))
-    
-    img.save(output_path)
+        circle_size = _even(min(width, height) * CIRCLE_SIZE_RATIO)
+    else:
+        circle_size = _even(circle_size)
+
+    image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    layout = fit_text_to_arc(text, circle_size)
+    if not layout.text:
+        image.save(output_path)
+        return output_path
+
+    center_x = width / 2.0
+    center_y = height / 2.0
+    cursor_angle = math.radians(layout.end_angle_deg + layout.span_deg)
+
+    for index, (character, advance) in enumerate(zip(layout.text, layout.advances)):
+        half_advance_angle = (advance / 2.0) / layout.path_radius
+        character_angle = cursor_angle - half_advance_angle
+        angle_deg = math.degrees(character_angle)
+
+        x = center_x + layout.path_radius * math.cos(character_angle)
+        y = center_y + layout.path_radius * math.sin(character_angle)
+        # Text progresses toward smaller polar angles. The corresponding
+        # tangent rises to the right in the lower-right quadrant.
+        rotation_deg = 90.0 - angle_deg
+
+        glyph = _render_glyph(
+            character,
+            layout.font_size,
+            layout.font_path,
+            rotation_deg,
+        )
+        if glyph is not None:
+            paste_x = int(round(x - glyph.width / 2.0))
+            paste_y = int(round(y - glyph.height / 2.0))
+            image.alpha_composite(glyph, (paste_x, paste_y))
+
+        # Move from the leading edge through the complete glyph advance.
+        cursor_angle -= 2.0 * half_advance_angle
+        if index < len(layout.text) - 1:
+            cursor_angle -= layout.tracking / layout.path_radius
+
+    image.save(output_path)
     return output_path
 
 
-def create_circle_mask(size: int, output_path: str = None) -> str:
-    """Create PNG mask: white circle on black background."""
+def create_circle_mask(size: int, output_path: Optional[str] = None) -> str:
+    """Create an antialiased circular alpha mask."""
     if output_path is None:
-        output_path = os.path.join(TEMP_DIR, f"circle_mask_{size}.png")
-    
-    # Create black background
-    img = Image.new("L", (size, size), 0)
-    draw = ImageDraw.Draw(img)
-    
-    # Draw white circle - меньше на 2% от размера
-    margin = int(size * 0.02)  # TODO: make configurable
+        output_path = _temporary_png_path("circle_mask")
+
+    size = _even(size)
+    scale = _MASK_RENDER_SCALE
+    high_size = size * scale
+    mask = Image.new("L", (high_size, high_size), 0)
+    draw = ImageDraw.Draw(mask)
+    inset = scale // 2
     draw.ellipse(
-        [margin, margin, size - margin, size - margin],
-        fill=255
+        (inset, inset, high_size - inset - 1, high_size - inset - 1),
+        fill=255,
     )
-    
-    img.save(output_path)
+    mask.resize((size, size), _LANCZOS).save(output_path)
+    return output_path
+
+
+def create_soft_square_mask(size: int, output_path: Optional[str] = None) -> str:
+    """Create a softly feathered square mask for the local background layer."""
+    if output_path is None:
+        output_path = _temporary_png_path("local_mask")
+
+    size = _even(size)
+    opacity = max(0.0, min(1.0, LOCAL_BACKGROUND_OPACITY))
+    maximum = int(round(255 * opacity))
+    feather = max(2, int(round(size * LOCAL_BACKGROUND_FEATHER_RATIO)))
+
+    mask = Image.new("L", (size, size), 0)
+    draw = ImageDraw.Draw(mask)
+    inset = max(1, feather // 2)
+    radius = max(2, int(round(size * 0.035)))
+    draw.rounded_rectangle(
+        (inset, inset, size - inset - 1, size - inset - 1),
+        radius=radius,
+        fill=maximum,
+    )
+    mask = mask.filter(ImageFilter.GaussianBlur(radius=max(1.0, feather / 2.0)))
+    mask.save(output_path)
     return output_path
 
 
 def parse_ffmpeg_progress(line: str, duration: float) -> Optional[float]:
-    """Parse FFmpeg progress line and return percentage (0-100)."""
-    # Look for time=HH:MM:SS.xx or time=SS.xx
-    time_match = re.search(r'time=(\d+):(\d+):(\d+\.\d+)', line)
+    """Parse FFmpeg log or ``-progress`` output into a percentage."""
+    if duration <= 0:
+        return None
+
+    time_match = re.search(
+        r"(?:out_time|time)=(\d+):(\d+):(\d+(?:\.\d+)?)",
+        line,
+    )
     if time_match:
         hours = int(time_match.group(1))
         minutes = int(time_match.group(2))
         seconds = float(time_match.group(3))
         current_time = hours * 3600 + minutes * 60 + seconds
-        if duration > 0:
-            return min(100.0, (current_time / duration) * 100)
-    
-    # Alternative format: time=123.45
-    alt_match = re.search(r'time=(\d+\.\d+)', line)
-    if alt_match:
-        current_time = float(alt_match.group(1))
-        if duration > 0:
-            return min(100.0, (current_time / duration) * 100)
-    
+        return min(100.0, (current_time / duration) * 100)
+
+    microseconds_match = re.search(r"out_time_(?:us|ms)=(\d+)", line)
+    if microseconds_match:
+        current_time = int(microseconds_match.group(1)) / 1_000_000
+        return min(100.0, (current_time / duration) * 100)
+
+    seconds_match = re.search(r"time=(\d+(?:\.\d+)?)", line)
+    if seconds_match:
+        current_time = float(seconds_match.group(1))
+        return min(100.0, (current_time / duration) * 100)
+
     return None
+
+
+def _local_square_size(width: int, height: int, circle_size: int) -> int:
+    maximum = _even(min(width, height))
+    requested = _even(circle_size * LOCAL_BACKGROUND_SIZE_RATIO)
+    return max(circle_size, min(requested, maximum))
+
+
+def _build_filter_complex(width: int, height: int, circle_size: int) -> str:
+    square_size = _local_square_size(width, height, circle_size)
+
+    ambient_scale = max(0.10, min(1.0, AMBIENT_DOWNSCALE))
+    ambient_width = _even(width * ambient_scale)
+    ambient_height = _even(height * ambient_scale)
+    zoom_width = _even(ambient_width * max(1.0, ZOOM_SCALE))
+    zoom_height = _even(ambient_height * max(1.0, ZOOM_SCALE))
+    ambient_sigma = max(0.1, BACKGROUND_BLUR * ambient_scale)
+
+    circle_x = (width - circle_size) // 2
+    circle_y = (height - circle_size) // 2
+    square_x = (width - square_size) // 2
+    square_y = (height - square_size) // 2
+
+    return (
+        "[0:v]split=3[ambient_src][local_src][circle_src];"
+        f"[ambient_src]scale={zoom_width}:{zoom_height}:"
+        "force_original_aspect_ratio=increase,"
+        f"crop={ambient_width}:{ambient_height},"
+        f"gblur=sigma={ambient_sigma:.3f}:steps=2,"
+        f"eq=brightness={BRIGHTNESS_ADJUST}:contrast={CONTRAST_ADJUST},"
+        f"scale={width}:{height}:flags=lanczos,setsar=1,format=yuv420p[ambient];"
+        f"[local_src]scale={square_size}:{square_size}:"
+        "force_original_aspect_ratio=increase,"
+        f"crop={square_size}:{square_size},"
+        f"gblur=sigma={max(0.1, LOCAL_BACKGROUND_BLUR):.3f}:steps=1,"
+        f"eq=brightness={LOCAL_BACKGROUND_BRIGHTNESS}:"
+        f"contrast={LOCAL_BACKGROUND_CONTRAST},"
+        "setsar=1,format=rgba[local_base];"
+        "[local_base][3:v]alphamerge[local];"
+        f"[circle_src]scale={circle_size}:{circle_size}:"
+        "force_original_aspect_ratio=increase,"
+        f"crop={circle_size}:{circle_size},setsar=1,format=rgba[circle_base];"
+        "[circle_base][2:v]alphamerge[circle];"
+        f"[ambient][local]overlay={square_x}:{square_y}:"
+        "format=auto:eof_action=repeat[ambient_local];"
+        f"[ambient_local][circle]overlay={circle_x}:{circle_y}:"
+        "format=auto:eof_action=repeat[video];"
+        "[video][1:v]overlay=0:0:format=auto:eof_action=repeat,"
+        "format=yuv420p[outv]"
+    )
 
 
 async def process_video_async(
@@ -122,164 +461,178 @@ async def process_video_async(
     output_path: str,
     target_size: Tuple[int, int],
     overlay_text: str = "",
-    progress_callback: Optional[Callable[[int], None]] = None,
+    progress_callback: Optional[Callable[[int], Awaitable[None]]] = None,
     video_duration: float = 0.0,
 ) -> str:
-    """
-    Process video note to target aspect ratio with black background and overlay.
-    Async version with progress tracking.
-    """
-    import time
-    start_time = time.time()
-    logger.info(f"Starting video processing: {input_path} -> {output_path} ({target_size[0]}x{target_size[1]})")
-    
+    """Render the ambient, local-square, clear-circle and arc-text layers."""
+    started_at = time.time()
     width, height = target_size
-    
-    # Create overlays
-    circle_size = min(width, height) * CIRCLE_SIZE_RATIO
-    circle_size = int(circle_size)
-    circle_size = (circle_size // 2) * 2
-    
-    text_overlay = create_text_overlay(width, height, overlay_text, circle_size=circle_size)
-    
-    circle_mask = create_circle_mask(circle_size)
-    
-    # Build FFmpeg command with progress output
-    filter_complex = (
-        f"[0:v]scale={int(width*ZOOM_SCALE)}:{int(height*ZOOM_SCALE)}:force_original_aspect_ratio=increase,"
-        f"crop={width}:{height},"
-        f"boxblur={BACKGROUND_BLUR}:{BACKGROUND_BLUR},"
-        f"eq=brightness={BRIGHTNESS_ADJUST}:contrast={CONTRAST_ADJUST},"
-        f"format=yuv420p[bg];"
-        f"[0:v]scale={circle_size}:{circle_size}[fg];"
-        f"[fg][2:v]alphamerge,format=rgba[circle];"
-        f"[bg][circle]overlay={(width-circle_size)//2}:{(height-circle_size)//2}:format=auto[video];"
-        f"[video][1:v]overlay=0:0:format=auto"
+    circle_size = _even(min(width, height) * CIRCLE_SIZE_RATIO)
+
+    logger.info(
+        "Starting video processing: %s -> %s (%sx%s)",
+        input_path,
+        output_path,
+        width,
+        height,
     )
-    
-    cmd = [
-        "ffmpeg",
-        "-y",
-    ]
-    
-    # Add threads if specified (0 = auto, >0 = specific count)
-    if FFMPEG_THREADS > 0:
-        cmd.extend(["-threads", str(FFMPEG_THREADS)])
-    
-    cmd.extend([
-        "-progress", "pipe:2",  # Output progress to stderr
-        "-i", input_path,
-        "-i", text_overlay,
-        "-i", circle_mask,
-        "-filter_complex", filter_complex,
-        "-c:v", "libx264",
-        "-preset", "fast",
-        "-crf", "23",
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-b:a", "128k",
-        "-movflags", "+faststart",
-        output_path
-    ])
-    
-    # Start FFmpeg process
-    process = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    
-    # Track progress (time-based updates)
-    import time
-    last_update_time = 0
-    last_reported_progress = -1
-    
-    # Read stderr for progress
-    async def read_stderr():
-        nonlocal last_update_time, last_reported_progress
-        while True:
-            line = await process.stderr.readline()
-            if not line:
-                break
-            line_str = line.decode('utf-8', errors='ignore').strip()
-            
-            # Log thread/cpu info from FFmpeg (compact format)
-            if '[libx264' in line_str or 'encoded' in line_str:
-                if 'cpu capabilities' in line_str:
-                    # Extract CPU capabilities
-                    caps = line_str.split('cpu capabilities:')[-1].strip()
-                    logger.info(f"FFmpeg CPU: {caps}")
-                elif 'threads=' in line_str:
-                    # Extract threads count and key options
-                    import re
-                    threads_match = re.search(r'threads=(\d+)', line_str)
-                    lookahead_match = re.search(r'lookahead_threads=(\d+)', line_str)
-                    crf_match = re.search(r'crf=([\d.]+)', line_str)
-                    
-                    threads = threads_match.group(1) if threads_match else '?'
-                    lookahead = lookahead_match.group(1) if lookahead_match else '?'
-                    crf = crf_match.group(1) if crf_match else '?'
-                    
-                    logger.info(f"FFmpeg config: threads={threads} (lookahead={lookahead}), CRF={crf}")
-                elif 'profile' in line_str:
-                    logger.info(f"FFmpeg: {line_str[line_str.find('profile'):]}")
-            
-            # Parse progress
-            if progress_callback and video_duration > 0:
-                progress = parse_ffmpeg_progress(line_str, video_duration)
-                if progress is not None:
+
+    generated_files: list[str] = []
+    process: Optional[asyncio.subprocess.Process] = None
+
+    try:
+        text_overlay = create_text_overlay(
+            width,
+            height,
+            overlay_text,
+            circle_size=circle_size,
+        )
+        generated_files.append(text_overlay)
+
+        circle_mask = create_circle_mask(circle_size)
+        generated_files.append(circle_mask)
+
+        square_size = _local_square_size(width, height, circle_size)
+        local_mask = create_soft_square_mask(square_size)
+        generated_files.append(local_mask)
+
+        filter_complex = _build_filter_complex(width, height, circle_size)
+
+        cmd = ["ffmpeg", "-y"]
+        if FFMPEG_THREADS > 0:
+            cmd.extend(["-threads", str(FFMPEG_THREADS)])
+
+        cmd.extend(
+            [
+                "-progress",
+                "pipe:2",
+                "-i",
+                input_path,
+                "-i",
+                text_overlay,
+                "-i",
+                circle_mask,
+                "-i",
+                local_mask,
+                "-filter_complex",
+                filter_complex,
+                "-map",
+                "[outv]",
+                "-map",
+                "0:a?",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "fast",
+                "-crf",
+                "23",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "128k",
+                "-movflags",
+                "+faststart",
+                output_path,
+            ]
+        )
+
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        last_update_time = 0.0
+        last_reported_progress = -1
+        stderr_tail: deque[str] = deque(maxlen=40)
+
+        async def read_stderr() -> None:
+            nonlocal last_update_time, last_reported_progress
+            assert process is not None and process.stderr is not None
+
+            while True:
+                raw_line = await process.stderr.readline()
+                if not raw_line:
+                    break
+                line = raw_line.decode("utf-8", errors="ignore").strip()
+                if line:
+                    stderr_tail.append(line)
+
+                if "[libx264" in line or "encoded" in line:
+                    if "cpu capabilities" in line:
+                        logger.info("FFmpeg CPU: %s", line.split("cpu capabilities:")[-1].strip())
+                    elif "threads=" in line:
+                        threads_match = re.search(r"threads=(\d+)", line)
+                        lookahead_match = re.search(r"lookahead_threads=(\d+)", line)
+                        crf_match = re.search(r"crf=([\d.]+)", line)
+                        logger.info(
+                            "FFmpeg config: threads=%s (lookahead=%s), CRF=%s",
+                            threads_match.group(1) if threads_match else "?",
+                            lookahead_match.group(1) if lookahead_match else "?",
+                            crf_match.group(1) if crf_match else "?",
+                        )
+
+                if progress_callback and video_duration > 0:
+                    progress = parse_ffmpeg_progress(line, video_duration)
+                    if progress is None:
+                        continue
+
                     progress_int = int(progress)
                     current_time = time.time()
-                    # Update every PROGRESS_UPDATE_INTERVAL seconds (temporary stub)
                     if current_time - last_update_time >= PROGRESS_UPDATE_INTERVAL:
                         last_update_time = current_time
                         last_reported_progress = progress_int
                         try:
                             await progress_callback(progress_int)
                         except Exception:
-                            pass  # Ignore callback errors
-    
-    # Wait for process to complete while reading progress
-    try:
+                            logger.debug("Progress callback failed", exc_info=True)
+
         await asyncio.wait_for(
-            asyncio.gather(
-                process.wait(),
-                read_stderr(),
-            ),
-            timeout=PROCESSING_TIMEOUT  # configurable timeout
+            asyncio.gather(process.wait(), read_stderr()),
+            timeout=PROCESSING_TIMEOUT,
         )
-        
+
         if process.returncode != 0:
-            # Try to get error from stderr
-            stderr_data = await process.stderr.read()
-            error_msg = stderr_data.decode('utf-8', errors='ignore')[-500:]  # Last 500 chars
-            raise RuntimeError(f"FFmpeg failed (code {process.returncode}): {error_msg}")
-        
-        # Final progress report
+            details = "\n".join(stderr_tail)[-2500:]
+            raise RuntimeError(
+                f"FFmpeg failed (code {process.returncode}): {details}"
+            )
+
         if progress_callback and last_reported_progress < 100:
             try:
                 await progress_callback(100)
             except Exception:
-                pass
-        
-        elapsed = time.time() - start_time
-        logger.info(f"Video processing completed in {elapsed:.1f}s")
+                logger.debug("Final progress callback failed", exc_info=True)
+
+        logger.info("Video processing completed in %.1fs", time.time() - started_at)
         return output_path
-        
-    except asyncio.TimeoutError:
-        process.kill()
-        await process.wait()
-        raise RuntimeError("Processing timeout (8 minutes)")
+
+    except asyncio.TimeoutError as exc:
+        if process and process.returncode is None:
+            process.kill()
+            await process.wait()
+        raise RuntimeError(
+            f"Processing timeout after {PROCESSING_TIMEOUT} seconds"
+        ) from exc
+    except asyncio.CancelledError:
+        if process and process.returncode is None:
+            process.kill()
+            await process.wait()
+        raise
+    finally:
+        cleanup_temp_files(*generated_files)
 
 
-def cleanup_temp_files(*paths: str):
+def cleanup_temp_files(*paths: str) -> None:
     """Remove temporary files."""
     for path in paths:
         try:
             if path and os.path.exists(path):
                 os.remove(path)
-        except Exception:
-            pass
+        except OSError:
+            logger.debug("Failed to remove temporary file %s", path, exc_info=True)
 
 
 # Keep sync version for backward compatibility (will be removed)

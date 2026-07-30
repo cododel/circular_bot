@@ -2,6 +2,7 @@
 import os
 import html
 import re
+import uuid
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery, FSInputFile
 from aiogram.filters import Command
@@ -36,9 +37,9 @@ def get_username_from_user(user) -> str | None:
     if not user:
         return None
     
-    # Prefer username with TG: prefix
+    # Keep the signature compact; the @ prefix already identifies Telegram.
     if user.username:
-        return f"TG: @{user.username}"
+        return f"@{user.username}"
     
     # Fallback to full name
     full_name = user.full_name.strip()
@@ -64,8 +65,8 @@ def extract_author_from_caption(caption: str | None) -> str | None:
     for pattern in patterns:
         match = re.search(pattern, caption, re.IGNORECASE)
         if match:
-            username = match.group(0) if match.group(0).startswith('@') else match.group(1)
-            return f"TG: {username}"
+            username = match.group(0) if match.group(0).startswith('@') else f"@{match.group(1)}"
+            return username
     
     return None
 
@@ -74,29 +75,25 @@ def normalize_username(text: str) -> str:
     """
     Normalize username input.
     - Trim whitespace
-    - Remove duplicate @ symbols
-    - Add TG: prefix if username-like
+    - Remove a legacy TG: prefix
+    - Collapse duplicate @ symbols
     """
     text = text.strip()
     
-    # If already has TG: prefix, keep it
-    if text.startswith("TG: "):
-        return text
-    if text.startswith("TG:"):
-        return f"TG: {text[3:].strip()}"
-    
-    # If looks like username (starts with @)
+    # Strip the legacy label so the arc contains only the useful identity.
+    if text.upper().startswith("TG:"):
+        text = text[3:].strip()
+
+    # If it looks like a username, keep exactly one @ prefix.
     if text.startswith("@"):
-        # Remove extra @ symbols (e.g., @@username -> @username)
-        text = re.sub(r'^@+', '@', text)
-        return f"TG: {text}"
+        return re.sub(r'^@+', '@', text)
     
     # If contains @ somewhere (like "channel @username")
     if "@" in text:
         # Try to extract username
         match = re.search(r'@([\w_]{5,32})', text)
         if match:
-            return f"TG: @{match.group(1)}"
+            return f"@{match.group(1)}"
     
     # Plain text - return as-is
     return text
@@ -144,7 +141,7 @@ async def handle_video_note(message: Message, state: FSMContext, bot: Bot):
             # Forwarded from channel
             chat = message.forward_origin.chat
             if chat.username:
-                original_author = f"TG: @{chat.username}"
+                original_author = f"@{chat.username}"
             else:
                 original_author = chat.title
         elif message.forward_origin.type == "user":
@@ -183,7 +180,7 @@ async def handle_video_note(message: Message, state: FSMContext, bot: Bot):
 async def handle_original_author_selection(callback: CallbackQuery, state: FSMContext):
     """Handle selection of original author as username source."""
     data = await state.get_data()
-    original_author = data.get("original_author", "TG: @unknown")
+    original_author = data.get("original_author", "@unknown")
     
     await state.update_data(overlay_text=original_author)
     await callback.answer(f"Выбран: {original_author}")
@@ -199,7 +196,7 @@ async def handle_original_author_selection(callback: CallbackQuery, state: FSMCo
 async def handle_sender_selection(callback: CallbackQuery, state: FSMContext):
     """Handle selection of sender as username source."""
     data = await state.get_data()
-    sender = data.get("sender_username", "TG: @unknown")
+    sender = data.get("sender_username", "@unknown")
     
     await state.update_data(overlay_text=sender)
     await callback.answer(f"Выбран: {sender}")
@@ -219,8 +216,8 @@ async def handle_custom_username_selection(callback: CallbackQuery, state: FSMCo
         "📝 Напиши текст подписи для оверлея.\n\n"
         "Примеры:\n"
         "• @channel_name\n"
-        "• TG: @username\n"
-        "• Мой канал"
+        "• Мой канал\n"
+        "• Автор видео"
     )
     await state.set_state(ProcessingState.waiting_for_text)
 
@@ -280,8 +277,9 @@ async def process_ratio_selection(callback: CallbackQuery, state: FSMContext, bo
         await callback.message.edit_text(f"⏳ Загружаю видео...")
         
         file = await bot.get_file(file_id)
-        temp_input = os.path.join(TEMP_DIR, f"input_{file_id}.mp4")
-        temp_output = os.path.join(TEMP_DIR, f"output_{file_id}_{ratio}.mp4")
+        job_id = uuid.uuid4().hex
+        temp_input = os.path.join(TEMP_DIR, f"input_{job_id}.mp4")
+        temp_output = os.path.join(TEMP_DIR, f"output_{job_id}_{ratio}.mp4")
         
         await bot.download_file(file.file_path, temp_input)
         
