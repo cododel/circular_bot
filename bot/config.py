@@ -40,8 +40,12 @@ LOCAL_BACKGROUND_FEATHER_RATIO = float(os.getenv("LOCAL_BACKGROUND_FEATHER_RATIO
 
 # Curved signature. Font size, gap and tracking are relative to the circle,
 # so the result stays visually consistent across 9:16, 1:1, 16:9 and 4:5.
-TEXT_FONT_SIZE_RATIO = float(os.getenv("TEXT_FONT_SIZE_RATIO", "0.060"))
+TEXT_FONT_SIZE_RATIO = float(os.getenv("TEXT_FONT_SIZE_RATIO", "0.085"))
 TEXT_MIN_FONT_SIZE_RATIO = float(os.getenv("TEXT_MIN_FONT_SIZE_RATIO", "0.022"))
+# Safety gap between the signature and the frame edge, relative to the shorter
+# frame side. The upper font size is capped by it, so a large ratio degrades
+# gracefully in tight formats (16:9, 1:1) instead of clipping the glyphs.
+TEXT_FRAME_MARGIN_RATIO = float(os.getenv("TEXT_FRAME_MARGIN_RATIO", "0.012"))
 TEXT_PADDING_RATIO = float(os.getenv("TEXT_PADDING_RATIO", "0.018"))
 TEXT_TRACKING_RATIO = float(os.getenv("TEXT_TRACKING_RATIO", "0.26"))
 TEXT_MIN_TRACKING_RATIO = float(os.getenv("TEXT_MIN_TRACKING_RATIO", "0.035"))
