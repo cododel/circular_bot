@@ -345,7 +345,10 @@ async def process_ratio_selection(callback: CallbackQuery, state: FSMContext, bo
     file_id = data.get("source_file_id")
     overlay_text = data.get("overlay_text", "")
     video_duration = float(data.get("source_duration") or 0.0)
-    
+    # Video notes need their own sampling rules: Telegram bakes a white round
+    # mask into them, so only the inner circle carries usable pixels.
+    source_kind = data.get("source_kind") or "video"
+
     temp_input = None
     temp_output = None
     progress_message = None
@@ -393,6 +396,7 @@ async def process_ratio_selection(callback: CallbackQuery, state: FSMContext, bo
             overlay_text=overlay_text,
             progress_callback=report_progress,
             video_duration=video_duration,
+            source_kind=source_kind,
         )
         
         # Send result

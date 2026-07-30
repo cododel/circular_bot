@@ -13,6 +13,11 @@ import pytest
 
 from bot import video_processor
 from bot.config import (
+    AMBIENT_BLUR_SIGMA,
+    AMBIENT_MAP_WIDTH,
+    AMBIENT_SATURATION,
+    AMBIENT_SMOOTHING_ALPHA,
+    AMBIENT_SMOOTHING_FRAMES,
     ASPECT_RATIOS,
     CIRCLE_SIZE_RATIO,
     LOCAL_BACKGROUND_OPACITY,
@@ -20,6 +25,8 @@ from bot.config import (
     TEXT_FONT_SIZE_RATIO,
     TEXT_FRAME_MARGIN_RATIO,
     TEXT_MIN_FONT_SIZE_RATIO,
+    VIDEO_NOTE_EDGE_TRIM,
+    VIDEO_NOTE_SAFE_CROP,
 )
 
 
@@ -179,18 +186,123 @@ def test_every_layer_center_crops_non_square_input() -> None:
     assert graph.count("crop=") == 3
 
 
+def test_ambient_is_built_from_a_tiny_colour_map() -> None:
+    """A wide blur is affordable only on a downscaled map."""
+    width, height = 720, 1280
+    graph = video_processor._build_filter_complex(width, height, 590)
+    map_width, map_height = video_processor._ambient_map_size(width, height)
+
+    assert map_width == video_processor._even(AMBIENT_MAP_WIDTH, minimum=16)
+    # The map keeps the canvas aspect ratio, so the colours stay where they are.
+    assert map_height == pytest.approx(map_width * height / width, abs=2)
+    assert f"crop={map_width}:{map_height}," in graph
+    assert f"gblur=sigma={AMBIENT_BLUR_SIGMA:.3f}:steps=2" in graph
+    assert f"saturation={AMBIENT_SATURATION}" in graph
+    # Sharpening kernels ring on a smooth colour field.
+    assert f"scale={width}:{height}:flags=bicubic" in graph
+
+
+def test_ambient_smoothing_weights_favour_the_current_frame() -> None:
+    """tmix orders weights oldest to newest, so the ramp must rise."""
+    smoothing = video_processor._ambient_smoothing_filter()
+
+    assert smoothing.startswith(f"tmix=frames={AMBIENT_SMOOTHING_FRAMES}:weights='")
+    weights = [float(value) for value in smoothing.split("'")[1].split()]
+
+    assert len(weights) == AMBIENT_SMOOTHING_FRAMES
+    assert weights[-1] == pytest.approx(1.0)
+    assert all(
+        earlier < later for earlier, later in zip(weights, weights[1:])
+    )
+    assert weights[-2] == pytest.approx(1.0 - AMBIENT_SMOOTHING_ALPHA, abs=1e-4)
+
+
+def test_ambient_smoothing_is_skipped_for_a_single_frame_window(monkeypatch) -> None:
+    monkeypatch.setattr(video_processor, "AMBIENT_SMOOTHING_FRAMES", 1)
+
+    assert video_processor._ambient_smoothing_filter() == ""
+    assert "tmix=" not in video_processor._build_filter_complex(720, 1280, 590)
+
+
+def test_video_note_layers_sample_only_inside_the_source_circle() -> None:
+    """Telegram bakes a white round mask in, so the corners are unusable."""
+    graph = video_processor._build_filter_complex(
+        720,
+        1280,
+        590,
+        video_processor.VIDEO_NOTE_KIND,
+    )
+
+    inner_crop = f"crop=iw*{VIDEO_NOTE_SAFE_CROP:.4f}:ih*{VIDEO_NOTE_SAFE_CROP:.4f},"
+    # The ambient and backdrop layers both take the inscribed square; the
+    # visible circle keeps the full frame and is only trimmed at the rim.
+    assert graph.count(inner_crop) == 2
+    assert f"[ambient_src]{inner_crop}" in graph
+    assert f"[local_src]{inner_crop}" in graph
+    # Any larger crop would reach past the circle into the white corners.
+    assert VIDEO_NOTE_SAFE_CROP <= 1 / math.sqrt(2)
+
+
+def test_video_note_circle_is_zoomed_past_the_baked_mask_rim() -> None:
+    circle_size = 590
+    graph = video_processor._build_filter_complex(
+        720,
+        1280,
+        circle_size,
+        video_processor.VIDEO_NOTE_KIND,
+    )
+    zoomed = video_processor._even(circle_size / VIDEO_NOTE_EDGE_TRIM)
+
+    assert zoomed > circle_size
+    assert f"[circle_src]scale={zoomed}:{zoomed}:" in graph
+    assert f"crop={circle_size}:{circle_size},setsar=1,format=rgba[circle_base]" in graph
+
+
+def test_regular_video_keeps_using_the_whole_frame() -> None:
+    graph = video_processor._build_filter_complex(720, 1280, 590)
+
+    assert "crop=iw*" not in graph
+    assert "[circle_src]scale=590:590:" in graph
+
+
+def test_video_note_backdrop_mask_is_round(tmp_path: Path) -> None:
+    """A square halo would redraw the silhouette we are removing."""
+    size = 340
+    round_mask = tmp_path / "round.png"
+    square_mask = tmp_path / "square.png"
+
+    video_processor.create_local_backdrop_mask(
+        size,
+        video_processor.VIDEO_NOTE_KIND,
+        str(round_mask),
+    )
+    video_processor.create_local_backdrop_mask(size, "video", str(square_mask))
+
+    expected_center = round(255 * LOCAL_BACKGROUND_OPACITY)
+    with Image.open(round_mask) as mask:
+        assert abs(mask.getpixel((size // 2, size // 2)) - expected_center) <= 1
+        # Mid-edge stays lit while the corners of the same square fall away.
+        assert mask.getpixel((size // 2, 6)) > 0
+        assert mask.getpixel((12, 12)) == 0
+
+    with Image.open(square_mask) as mask:
+        assert mask.getpixel((12, 12)) > 0
+
+
 @pytest.mark.parametrize(
-    ("source_size", "source_label"),
+    ("source_size", "source_kind", "source_label"),
     [
-        ("256x256", "square video note"),
-        ("320x180", "landscape video"),
-        ("180x320", "portrait video"),
+        ("256x256", "video_note", "square video note"),
+        ("256x256", "video", "square video"),
+        ("320x180", "video", "landscape video"),
+        ("180x320", "video", "portrait video"),
     ],
 )
 def test_ffmpeg_integration_and_generated_file_cleanup(
     tmp_path: Path,
     monkeypatch,
     source_size: str,
+    source_kind: str,
     source_label: str,
 ) -> None:
     ffmpeg = shutil.which("ffmpeg")
@@ -229,6 +341,7 @@ def test_ffmpeg_integration_and_generated_file_cleanup(
             (320, 568),
             overlay_text="@Cododel",
             video_duration=0.5,
+            source_kind=source_kind,
         )
     )
 

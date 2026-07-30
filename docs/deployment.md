@@ -83,7 +83,8 @@ deploy:
 **Опциональные:**
 - `ALLOW_USER_IDS` — whitelist пользователей
 - `FFMPEG_THREADS` — потоки FFmpeg (0=авто)
-- `BACKGROUND_BLUR` — сила размытия (40 по умолчанию, 20 для скорости)
+- `AMBIENT_MAP_WIDTH` — ширина цветовой карты фона (96 по умолчанию, 64 для скорости)
+- `AMBIENT_SMOOTHING_FRAMES` — окно временного сглаживания фона (10 по умолчанию)
 
 Полный список см. в [Development.md](development.md#переменные-окружения).
 
@@ -102,7 +103,7 @@ deploy:
 ### Долгая обработка видео (>30 сек)
 
 1. Проверь CPU Limit в Dokploy (минимум 2 ядра)
-2. Уменьши `BACKGROUND_BLUR` до 20
+2. Уменьши `AMBIENT_MAP_WIDTH` до 64
 3. Ограничь `FFMPEG_THREADS` до 4
 
 См. подробнее в [Performance.md](performance.md).

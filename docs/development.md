@@ -58,7 +58,13 @@ cp .env.example .env
 | `PROGRESS_UPDATE_INTERVAL` | Интервал обновления прогресса (сек) | 3 |
 | `ZOOM_SCALE` | Масштабирование фона | 1.08 |
 | `CIRCLE_SIZE_RATIO` | Размер кружка относительно видео | 0.82 |
-| `BACKGROUND_BLUR` | Сила размытия фона | 40 |
+| `AMBIENT_MAP_WIDTH` | Ширина цветовой карты, из которой строится фон | 96 |
+| `AMBIENT_BLUR_SIGMA` | Сила размытия на цветовой карте | 6 |
+| `AMBIENT_SATURATION` | Насыщенность ambient-фона | 1.30 |
+| `AMBIENT_SMOOTHING_FRAMES` | Окно временного сглаживания, кадров (1 = выкл) | 10 |
+| `AMBIENT_SMOOTHING_ALPHA` | Вес текущего кадра в EMA | 0.25 |
+| `VIDEO_NOTE_SAFE_CROP` | Доля кадра кружка, гарантированно внутри круга (≤ 0.707) | 0.70 |
+| `VIDEO_NOTE_EDGE_TRIM` | Обрезка каймы белой маски Telegram | 0.985 |
 | `TEXT_FONT_SIZE_RATIO` | Верхний размер шрифта подписи относительно кружка | 0.085 |
 | `TEXT_MIN_FONT_SIZE_RATIO` | Нижний размер шрифта подписи относительно кружка | 0.022 |
 | `TEXT_FRAME_MARGIN_RATIO` | Минимальный отступ подписи от края кадра | 0.012 |
@@ -122,7 +128,8 @@ circle-overlay-bot/
 
 | Проблема | Решение | ENV |
 |----------|---------|-----|
-| Медленный blur | Уменьшить силу размытия | `BACKGROUND_BLUR=20` |
+| Медленный ambient | Уменьшить цветовую карту | `AMBIENT_MAP_WIDTH=64` |
+| Дрожание фона | Удлинить сглаживание | `AMBIENT_SMOOTHING_FRAMES=16` |
 | Большой zoom | Уменьшить масштаб | `ZOOM_SCALE=1.05` |
 | Много потоков (overhead) | Ограничить до 4-6 | `FFMPEG_THREADS=4` |
 
