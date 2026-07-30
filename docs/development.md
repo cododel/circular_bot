@@ -57,12 +57,14 @@ cp .env.example .env
 | `PROCESSING_TIMEOUT` | Таймаут обработки (сек) | 480 |
 | `PROGRESS_UPDATE_INTERVAL` | Интервал обновления прогресса (сек) | 3 |
 | `ZOOM_SCALE` | Масштабирование фона | 1.08 |
-| `CIRCLE_SIZE_RATIO` | Размер кружка относительно видео | 0.82 |
+| `CIRCLE_SIZE_RATIO` | Размер кружка относительно меньшей стороны кадра | 0.93 |
 | `AMBIENT_MAP_WIDTH` | Ширина цветовой карты, из которой строится фон | 96 |
 | `AMBIENT_BLUR_SIGMA` | Сила размытия на цветовой карте | 6 |
 | `AMBIENT_SATURATION` | Насыщенность ambient-фона | 1.30 |
 | `AMBIENT_SMOOTHING_FRAMES` | Окно временного сглаживания, кадров (1 = выкл) | 10 |
 | `AMBIENT_SMOOTHING_ALPHA` | Вес текущего кадра в EMA | 0.25 |
+| `LOCAL_BACKGROUND_SQUARE_FEATHER_RATIO` | Мягкость границы квадратной подложки (обычное видео) | 0.09 |
+| `LOCAL_BACKGROUND_SIZE_RATIO` | Размер круглого ореола относительно кружка (обрезается кадром) | 1.14 |
 | `VIDEO_NOTE_SAFE_CROP` | Доля кадра кружка, гарантированно внутри круга (≤ 0.707) | 0.70 |
 | `VIDEO_NOTE_EDGE_TRIM` | Обрезка каймы белой маски Telegram | 0.985 |
 | `TEXT_FONT_SIZE_RATIO` | Верхний размер шрифта подписи относительно кружка | 0.085 |

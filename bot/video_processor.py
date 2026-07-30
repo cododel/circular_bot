@@ -27,9 +27,9 @@ from bot.config import (
     LOCAL_BACKGROUND_BLUR,
     LOCAL_BACKGROUND_BRIGHTNESS,
     LOCAL_BACKGROUND_CONTRAST,
-    LOCAL_BACKGROUND_FEATHER_RATIO,
     LOCAL_BACKGROUND_OPACITY,
     LOCAL_BACKGROUND_SIZE_RATIO,
+    LOCAL_BACKGROUND_SQUARE_FEATHER_RATIO,
     PROCESSING_TIMEOUT,
     PROGRESS_UPDATE_INTERVAL,
     TEMP_DIR,
@@ -423,35 +423,14 @@ def create_circle_mask(size: int, output_path: Optional[str] = None) -> str:
 
 
 def create_soft_square_mask(size: int, output_path: Optional[str] = None) -> str:
-    """Create a softly feathered square mask for the local background layer."""
-    if output_path is None:
-        output_path = _temporary_png_path("local_mask")
+    """Create a softly feathered square mask for the local background layer.
 
-    size = _even(size)
-    opacity = max(0.0, min(1.0, LOCAL_BACKGROUND_OPACITY))
-    maximum = int(round(255 * opacity))
-    feather = max(2, int(round(size * LOCAL_BACKGROUND_FEATHER_RATIO)))
-
-    mask = Image.new("L", (size, size), 0)
-    draw = ImageDraw.Draw(mask)
-    inset = max(1, feather // 2)
-    radius = max(2, int(round(size * 0.035)))
-    draw.rounded_rectangle(
-        (inset, inset, size - inset - 1, size - inset - 1),
-        radius=radius,
-        fill=maximum,
-    )
-    mask = mask.filter(ImageFilter.GaussianBlur(radius=max(1.0, feather / 2.0)))
-    mask.save(output_path)
-    return output_path
-
-
-def create_soft_circle_mask(size: int, output_path: Optional[str] = None) -> str:
-    """Create a softly feathered round mask for the local background layer.
-
-    A video note is round, so a square backdrop would draw a square silhouette
-    around it — exactly the shape Telegram's own white mask leaves behind. The
-    circular halo fades into the ambient layer instead.
+    The square is the same size as the clear circle, so only its corners show
+    and its border has to reach zero alpha exactly at the frame edge. Insetting
+    the opaque core by a full feather puts that edge three sigma out, where the
+    Gaussian tail has died: fading over half a feather instead would leave the
+    border stepping straight from nothing to a quarter opacity, which reads as
+    a hard line around the square.
     """
     if output_path is None:
         output_path = _temporary_png_path("local_mask")
@@ -459,25 +438,72 @@ def create_soft_circle_mask(size: int, output_path: Optional[str] = None) -> str
     size = _even(size)
     opacity = max(0.0, min(1.0, LOCAL_BACKGROUND_OPACITY))
     maximum = int(round(255 * opacity))
-    feather = max(2, int(round(size * LOCAL_BACKGROUND_FEATHER_RATIO)))
+    feather = max(2, int(round(size * LOCAL_BACKGROUND_SQUARE_FEATHER_RATIO)))
 
     mask = Image.new("L", (size, size), 0)
     draw = ImageDraw.Draw(mask)
     inset = max(1, feather)
+    radius = max(2, int(round(size * 0.035)))
+    draw.rounded_rectangle(
+        (inset, inset, size - inset - 1, size - inset - 1),
+        radius=radius,
+        fill=maximum,
+    )
+    mask = mask.filter(ImageFilter.GaussianBlur(radius=max(1.0, feather / 3.0)))
+    mask.save(output_path)
+    return output_path
+
+
+def create_soft_circle_mask(
+    size: int,
+    circle_size: int,
+    output_path: Optional[str] = None,
+) -> str:
+    """Create a softly feathered round mask for the local background layer.
+
+    A video note is round, so a square backdrop would draw a square silhouette
+    around it — exactly the shape Telegram's own white mask leaves behind. The
+    circular halo fades into the ambient layer instead.
+
+    Only the ring between the circle and the halo's own edge is ever visible,
+    and how wide that ring is depends on the circle size and the frame, so the
+    fade is derived from it rather than from a fixed ratio: the gradient is
+    centred on the middle of the ring and spans it at three sigma either way.
+    That keeps the halo at full strength where it meets the circle and at zero
+    alpha on its border no matter how thin the ring gets — a fade measured
+    against the halo diameter instead collapses under the circle and vanishes
+    as soon as the circle grows.
+    """
+    if output_path is None:
+        output_path = _temporary_png_path("local_mask")
+
+    size = _even(size)
+    opacity = max(0.0, min(1.0, LOCAL_BACKGROUND_OPACITY))
+    maximum = int(round(255 * opacity))
+
+    circle_radius = min(_even(circle_size), size) / 2.0
+    ring = max(1.0, size / 2.0 - circle_radius)
+    core_radius = circle_radius + ring / 2.0
+    sigma = max(1.0, ring / 6.0)
+
+    mask = Image.new("L", (size, size), 0)
+    draw = ImageDraw.Draw(mask)
+    inset = size / 2.0 - core_radius
     draw.ellipse((inset, inset, size - inset - 1, size - inset - 1), fill=maximum)
-    mask = mask.filter(ImageFilter.GaussianBlur(radius=max(1.0, feather / 2.0)))
+    mask = mask.filter(ImageFilter.GaussianBlur(radius=sigma))
     mask.save(output_path)
     return output_path
 
 
 def create_local_backdrop_mask(
     size: int,
+    circle_size: int,
     source_kind: str,
     output_path: Optional[str] = None,
 ) -> str:
     """Pick the backdrop silhouette that matches the source geometry."""
     if source_kind == VIDEO_NOTE_KIND:
-        return create_soft_circle_mask(size, output_path)
+        return create_soft_circle_mask(size, circle_size, output_path)
     return create_soft_square_mask(size, output_path)
 
 
@@ -560,7 +586,26 @@ async def probe_duration(path: str) -> float:
     return duration if math.isfinite(duration) and duration > 0 else 0.0
 
 
-def _local_backdrop_size(width: int, height: int, circle_size: int) -> int:
+def _local_backdrop_size(
+    width: int,
+    height: int,
+    circle_size: int,
+    source_kind: str = "video",
+) -> int:
+    """Side of the backdrop layer sitting directly behind the clear circle.
+
+    A regular video keeps it at the circle diameter. The backdrop is then
+    scaled exactly like the circle layer, so its blurred corners continue the
+    sharp circle content straight across the edge instead of stepping to a
+    different zoom, and the square meets the circle flush at the four tangent
+    points.
+
+    A video note draws a round halo instead, which only reads if it extends
+    past the circle — hence the ratio.
+    """
+    if source_kind != VIDEO_NOTE_KIND:
+        return circle_size
+
     maximum = _even(min(width, height))
     requested = _even(circle_size * LOCAL_BACKGROUND_SIZE_RATIO)
     return max(circle_size, min(requested, maximum))
@@ -604,7 +649,7 @@ def _build_filter_complex(
     background layers are sampled from inside the source circle only. Ordinary
     videos keep using the whole frame.
     """
-    backdrop_size = _local_backdrop_size(width, height, circle_size)
+    backdrop_size = _local_backdrop_size(width, height, circle_size, source_kind)
     map_width, map_height = _ambient_map_size(width, height)
     zoom_width = _even(map_width * max(1.0, ZOOM_SCALE), minimum=16)
     zoom_height = _even(map_height * max(1.0, ZOOM_SCALE), minimum=16)
@@ -699,8 +744,17 @@ async def process_video_async(
         circle_mask = create_circle_mask(circle_size)
         generated_files.append(circle_mask)
 
-        backdrop_size = _local_backdrop_size(width, height, circle_size)
-        local_mask = create_local_backdrop_mask(backdrop_size, source_kind)
+        backdrop_size = _local_backdrop_size(
+            width,
+            height,
+            circle_size,
+            source_kind,
+        )
+        local_mask = create_local_backdrop_mask(
+            backdrop_size,
+            circle_size,
+            source_kind,
+        )
         generated_files.append(local_mask)
 
         filter_complex = _build_filter_complex(

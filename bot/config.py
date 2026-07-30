@@ -19,7 +19,7 @@ PROCESSING_TIMEOUT = int(os.getenv("PROCESSING_TIMEOUT", "480"))
 PROGRESS_UPDATE_INTERVAL = int(os.getenv("PROGRESS_UPDATE_INTERVAL", "3"))
 
 # Main composition
-CIRCLE_SIZE_RATIO = float(os.getenv("CIRCLE_SIZE_RATIO", "0.82"))
+CIRCLE_SIZE_RATIO = float(os.getenv("CIRCLE_SIZE_RATIO", "0.93"))
 ZOOM_SCALE = float(os.getenv("ZOOM_SCALE", "1.08"))
 
 # YouTube-like ambient background. Each frame is reduced to a tiny colour map,
@@ -42,13 +42,28 @@ AMBIENT_SMOOTHING_ALPHA = float(os.getenv("AMBIENT_SMOOTHING_ALPHA", "0.25"))
 BRIGHTNESS_ADJUST = float(os.getenv("BRIGHTNESS_ADJUST", "-0.24"))
 CONTRAST_ADJUST = float(os.getenv("CONTRAST_ADJUST", "1.05"))
 
-# Weakly blurred square immediately behind the clear circle.
+# Weakly blurred backdrop immediately behind the clear circle. On a regular
+# video it is a square at the circle diameter, so it is scaled exactly like the
+# circle and its corners continue that content flush across the edge; the ratio
+# below does not apply there. Video notes get a round halo instead, and it only
+# reads if it extends past the circle — that is what the ratio sizes.
 LOCAL_BACKGROUND_SIZE_RATIO = float(os.getenv("LOCAL_BACKGROUND_SIZE_RATIO", "1.14"))
 LOCAL_BACKGROUND_BLUR = float(os.getenv("LOCAL_BACKGROUND_BLUR", "7"))
 LOCAL_BACKGROUND_BRIGHTNESS = float(os.getenv("LOCAL_BACKGROUND_BRIGHTNESS", "-0.10"))
 LOCAL_BACKGROUND_CONTRAST = float(os.getenv("LOCAL_BACKGROUND_CONTRAST", "1.03"))
 LOCAL_BACKGROUND_OPACITY = float(os.getenv("LOCAL_BACKGROUND_OPACITY", "0.90"))
-LOCAL_BACKGROUND_FEATHER_RATIO = float(os.getenv("LOCAL_BACKGROUND_FEATHER_RATIO", "0.045"))
+# The round halo behind a video note has no feather knob: only the ring
+# between the circle and the halo edge is ever visible, and its width follows
+# from CIRCLE_SIZE_RATIO and the frame, so the fade is derived from that ring
+# instead. See create_soft_circle_mask().
+#
+# Feathering of the square backdrop behind a regular video. The square matches
+# the circle, so only its corners show: the fade has to reach zero alpha right
+# at the square's border and be back to full by the time it meets the circle.
+# That needs a much wider band than the halo above — hence a separate ratio.
+LOCAL_BACKGROUND_SQUARE_FEATHER_RATIO = float(
+    os.getenv("LOCAL_BACKGROUND_SQUARE_FEATHER_RATIO", "0.09")
+)
 
 # Video notes carry Telegram's white round mask baked into the file: outside
 # the inscribed circle every frame is pure white. Only the inner circle may

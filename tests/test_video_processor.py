@@ -21,6 +21,7 @@ from bot.config import (
     ASPECT_RATIOS,
     CIRCLE_SIZE_RATIO,
     LOCAL_BACKGROUND_OPACITY,
+    LOCAL_BACKGROUND_SIZE_RATIO,
     TEXT_ARC_MAX_SPAN_DEG,
     TEXT_FONT_SIZE_RATIO,
     TEXT_FRAME_MARGIN_RATIO,
@@ -131,6 +132,28 @@ def test_text_overlay_is_unique_and_outside_clear_circle(tmp_path: Path, monkeyp
                     )
 
         assert minimum_opaque_distance > visible_radius
+
+
+def test_square_backdrop_fades_to_nothing_at_its_own_border(tmp_path: Path) -> None:
+    """A border that starts at partial alpha draws a hard line around the square."""
+    size = 590
+    mask_path = tmp_path / "square.png"
+    video_processor.create_soft_square_mask(size, str(mask_path))
+
+    with Image.open(mask_path) as mask:
+        border = [mask.getpixel((x, 0)) for x in range(0, size, 20)]
+        border += [mask.getpixel((0, y)) for y in range(0, size, 20)]
+        assert max(border) == 0
+
+        # ...and it is back to full opacity by the time it reaches the circle,
+        # so the backdrop still meets the circle content flush at the corners.
+        circle_edge = int(round(size * (2**0.5 - 1) / 2 / 2**0.5))
+        opaque = round(255 * LOCAL_BACKGROUND_OPACITY)
+        assert mask.getpixel((circle_edge, circle_edge)) >= opaque * 0.9
+
+        # The fade in between is gradual rather than a couple of steps.
+        profile = [mask.getpixel((d, d)) for d in range(0, circle_edge)]
+        assert max(b - a for a, b in zip(profile, profile[1:])) < opaque * 0.1
 
 
 def test_circle_and_local_masks_are_antialiased(tmp_path: Path) -> None:
@@ -265,18 +288,58 @@ def test_regular_video_keeps_using_the_whole_frame() -> None:
     assert "[circle_src]scale=590:590:" in graph
 
 
+def test_regular_video_backdrop_is_scaled_exactly_like_the_circle() -> None:
+    """A backdrop at another zoom steps visibly at the circle edge."""
+    width, height, circle_size = 720, 1280, 590
+
+    assert video_processor._local_backdrop_size(width, height, circle_size) == circle_size
+
+    graph = video_processor._build_filter_complex(width, height, circle_size)
+
+    # Same scale and same crop, so the blurred corners continue the sharp
+    # circle content across the edge instead of jumping to a different zoom.
+    assert f"[local_src]scale={circle_size}:{circle_size}:" in graph
+    assert f"[circle_src]scale={circle_size}:{circle_size}:" in graph
+    assert graph.count(f"crop={circle_size}:{circle_size},") == 2
+
+    # ...and both land on the same spot, so the square is flush with the circle.
+    x = (width - circle_size) // 2
+    y = (height - circle_size) // 2
+    assert graph.count(f"overlay={x}:{y}:") == 2
+
+
+def test_video_note_halo_still_extends_past_the_circle() -> None:
+    """The round halo is only visible where it reaches beyond the circle."""
+    circle_size = 590
+    size = video_processor._local_backdrop_size(
+        720,
+        1280,
+        circle_size,
+        video_processor.VIDEO_NOTE_KIND,
+    )
+
+    assert size > circle_size
+    assert size == pytest.approx(circle_size * LOCAL_BACKGROUND_SIZE_RATIO, abs=2)
+
+
 def test_video_note_backdrop_mask_is_round(tmp_path: Path) -> None:
     """A square halo would redraw the silhouette we are removing."""
-    size = 340
+    size, circle_size = 340, 300
     round_mask = tmp_path / "round.png"
     square_mask = tmp_path / "square.png"
 
     video_processor.create_local_backdrop_mask(
         size,
+        circle_size,
         video_processor.VIDEO_NOTE_KIND,
         str(round_mask),
     )
-    video_processor.create_local_backdrop_mask(size, "video", str(square_mask))
+    video_processor.create_local_backdrop_mask(
+        size,
+        circle_size,
+        "video",
+        str(square_mask),
+    )
 
     expected_center = round(255 * LOCAL_BACKGROUND_OPACITY)
     with Image.open(round_mask) as mask:
@@ -286,7 +349,29 @@ def test_video_note_backdrop_mask_is_round(tmp_path: Path) -> None:
         assert mask.getpixel((12, 12)) == 0
 
     with Image.open(square_mask) as mask:
-        assert mask.getpixel((12, 12)) > 0
+        # The square keeps its corners — that is the only part of it on show,
+        # and it is exactly where the round halo has nothing.
+        assert mask.getpixel((size // 4, size // 4)) > 0
+
+
+@pytest.mark.parametrize("ring", [8, 26, 60])
+def test_round_halo_survives_any_ring_width(tmp_path: Path, ring: int) -> None:
+    """The ring narrows as the circle grows; the glow has to hold up anyway."""
+    size = 720
+    circle_size = size - 2 * ring
+    mask_path = tmp_path / f"halo_{ring}.png"
+    video_processor.create_soft_circle_mask(size, circle_size, str(mask_path))
+
+    opaque = round(255 * LOCAL_BACKGROUND_OPACITY)
+    centre = size // 2
+
+    with Image.open(mask_path) as mask:
+        # Full strength where it meets the circle, so the glow is not a faint
+        # smear left over from a fade measured against the halo diameter.
+        assert mask.getpixel((centre - circle_size // 2 + 1, centre)) >= opaque * 0.95
+        # ...and gone by its own border, so the halo draws no hard outline.
+        assert mask.getpixel((0, centre)) == 0
+        assert mask.getpixel((centre, 0)) == 0
 
 
 @pytest.mark.parametrize(
