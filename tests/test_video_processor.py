@@ -13,9 +13,12 @@ import pytest
 
 from bot import video_processor
 from bot.config import (
+    ASPECT_RATIOS,
+    CIRCLE_SIZE_RATIO,
     LOCAL_BACKGROUND_OPACITY,
     TEXT_ARC_MAX_SPAN_DEG,
     TEXT_FONT_SIZE_RATIO,
+    TEXT_FRAME_MARGIN_RATIO,
     TEXT_MIN_FONT_SIZE_RATIO,
 )
 
@@ -48,6 +51,46 @@ def test_long_ui_signature_scales_without_truncation() -> None:
     assert layout.font_size >= round(circle_size * TEXT_MIN_FONT_SIZE_RATIO)
     assert layout.font_size < round(circle_size * TEXT_FONT_SIZE_RATIO)
     assert layout.span_deg <= TEXT_ARC_MAX_SPAN_DEG + 1e-6
+
+
+@pytest.mark.parametrize("ratio_name", sorted(ASPECT_RATIOS))
+def test_signature_keeps_frame_margin_in_every_aspect_ratio(
+    tmp_path: Path,
+    monkeypatch,
+    ratio_name: str,
+) -> None:
+    monkeypatch.setattr(video_processor, "TEMP_DIR", str(tmp_path))
+    width, height = ASPECT_RATIOS[ratio_name]
+    circle_size = video_processor._even(min(width, height) * CIRCLE_SIZE_RATIO)
+    margin = min(width, height) * TEXT_FRAME_MARGIN_RATIO
+
+    layout = video_processor.fit_text_to_arc("@Cododel", circle_size, frame_size=(width, height))
+    overlay = Path(
+        video_processor.create_text_overlay(width, height, "@Cododel", circle_size=circle_size)
+    )
+
+    assert layout.font_size <= round(circle_size * TEXT_FONT_SIZE_RATIO)
+    assert layout.font_size >= round(circle_size * TEXT_MIN_FONT_SIZE_RATIO)
+
+    with Image.open(overlay) as image:
+        bbox = image.getchannel("A").getbbox()
+
+    assert bbox is not None
+    assert bbox[0] >= margin and bbox[1] >= margin
+    assert bbox[2] <= width - margin and bbox[3] <= height - margin
+
+
+def test_tight_frame_shrinks_signature_below_the_upper_font_size() -> None:
+    # 16:9 leaves the least room under the circle, so the ceiling cannot be
+    # reached there while 9:16 renders the same circle at full size.
+    width, height = ASPECT_RATIOS["16:9"]
+    circle_size = video_processor._even(min(width, height) * CIRCLE_SIZE_RATIO)
+
+    unbounded = video_processor.fit_text_to_arc("@Cododel", circle_size)
+    bounded = video_processor.fit_text_to_arc("@Cododel", circle_size, frame_size=(width, height))
+
+    assert unbounded.font_size == round(circle_size * TEXT_FONT_SIZE_RATIO)
+    assert bounded.font_size < unbounded.font_size
 
 
 def test_text_overlay_is_unique_and_outside_clear_circle(tmp_path: Path, monkeypatch) -> None:

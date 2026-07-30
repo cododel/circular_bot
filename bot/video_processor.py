@@ -33,6 +33,7 @@ from bot.config import (
     TEXT_ARC_END_DEG,
     TEXT_ARC_MAX_SPAN_DEG,
     TEXT_FONT_SIZE_RATIO,
+    TEXT_FRAME_MARGIN_RATIO,
     TEXT_MIN_FONT_SIZE_RATIO,
     TEXT_MIN_TRACKING_RATIO,
     TEXT_PADDING_RATIO,
@@ -162,7 +163,59 @@ def _layout_for_size(
     )
 
 
-def fit_text_to_arc(text: str, circle_size: int) -> ArcTextLayout:
+def _stroke_width(font_size: float) -> int:
+    """Outline width used by the glyph renderer."""
+    return max(1, int(round(font_size * 0.035)))
+
+
+def _outer_extent(layout: ArcTextLayout) -> float:
+    """Distance from the frame centre to the outer edge of the drawn glyphs.
+
+    Every glyph is rotated to the tangent and pasted centred on the path, so
+    its own downward direction points away from the circle: half of the tallest
+    glyph box plus the outline sticks out beyond the path radius.
+    """
+    font = _load_font(layout.font_size, layout.font_path)
+    bbox = font.getbbox(layout.text)
+    glyph_height = max(0.0, float(bbox[3] - bbox[1]))
+    return layout.path_radius + glyph_height / 2.0 + _stroke_width(layout.font_size)
+
+
+def _layout_fits_frame(
+    layout: ArcTextLayout,
+    frame_size: Optional[Tuple[int, int]],
+) -> bool:
+    """Check that the arc stays inside the frame with a safety margin."""
+    if frame_size is None:
+        return True
+
+    width, height = frame_size
+    margin = min(width, height) * TEXT_FRAME_MARGIN_RATIO
+    extent = _outer_extent(layout)
+
+    start_deg = layout.end_angle_deg
+    end_deg = start_deg + layout.span_deg
+    # Sample the arc ends plus every axis extremum they enclose.
+    angles = [start_deg, end_deg]
+    angles += [deg for deg in (0.0, 90.0, 180.0, 270.0) if start_deg < deg < end_deg]
+    offsets = [
+        (extent * math.cos(math.radians(deg)), extent * math.sin(math.radians(deg)))
+        for deg in angles
+    ]
+
+    center_x, center_y = width / 2.0, height / 2.0
+    return all(
+        margin <= center_x + dx <= width - margin
+        and margin <= center_y + dy <= height - margin
+        for dx, dy in offsets
+    )
+
+
+def fit_text_to_arc(
+    text: str,
+    circle_size: int,
+    frame_size: Optional[Tuple[int, int]] = None,
+) -> ArcTextLayout:
     """Fit text to the lower-right circle arc by scaling and, last, ellipsis."""
     normalized_text = _normalize_overlay_text(text)
     font_path = _resolve_font_path()
@@ -200,13 +253,19 @@ def fit_text_to_arc(text: str, circle_size: int) -> ArcTextLayout:
                 continue
             tracking = min(preferred_tracking, available_tracking)
 
-        return _layout_for_size(
+        layout = _layout_for_size(
             normalized_text,
             circle_size,
             font_size,
             font_path,
             tracking=tracking,
         )
+        # A generous upper font size is only usable where the frame leaves room
+        # for it; tight formats keep shrinking instead of clipping the arc.
+        if not _layout_fits_frame(layout, frame_size):
+            continue
+
+        return layout
 
     # A custom label can still exceed the configured arc when this function is
     # reused outside the 50-character UI limit. Preserve the beginning and make
@@ -240,7 +299,7 @@ def _render_glyph(
 
     scale = _TEXT_RENDER_SCALE
     font = _load_font(font_size * scale, font_path)
-    stroke_width = max(1, int(round(font_size * scale * 0.035)))
+    stroke_width = _stroke_width(font_size * scale)
 
     probe = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
     probe_draw = ImageDraw.Draw(probe)
@@ -294,7 +353,7 @@ def create_text_overlay(
         circle_size = _even(circle_size)
 
     image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    layout = fit_text_to_arc(text, circle_size)
+    layout = fit_text_to_arc(text, circle_size, frame_size=(width, height))
     if not layout.text:
         image.save(output_path)
         return output_path
