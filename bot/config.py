@@ -19,7 +19,7 @@ PROCESSING_TIMEOUT = int(os.getenv("PROCESSING_TIMEOUT", "480"))
 PROGRESS_UPDATE_INTERVAL = int(os.getenv("PROGRESS_UPDATE_INTERVAL", "3"))
 
 # Main composition
-CIRCLE_SIZE_RATIO = float(os.getenv("CIRCLE_SIZE_RATIO", "0.82"))
+CIRCLE_SIZE_RATIO = float(os.getenv("CIRCLE_SIZE_RATIO", "0.93"))
 ZOOM_SCALE = float(os.getenv("ZOOM_SCALE", "1.08"))
 
 # YouTube-like ambient background. Each frame is reduced to a tiny colour map,
@@ -52,10 +52,11 @@ LOCAL_BACKGROUND_BLUR = float(os.getenv("LOCAL_BACKGROUND_BLUR", "7"))
 LOCAL_BACKGROUND_BRIGHTNESS = float(os.getenv("LOCAL_BACKGROUND_BRIGHTNESS", "-0.10"))
 LOCAL_BACKGROUND_CONTRAST = float(os.getenv("LOCAL_BACKGROUND_CONTRAST", "1.03"))
 LOCAL_BACKGROUND_OPACITY = float(os.getenv("LOCAL_BACKGROUND_OPACITY", "0.90"))
-# Feathering of the round halo behind a video note. It is a thin ring outside
-# the circle, so it stays opaque where it meets the circle and fades over the
-# ring width.
-LOCAL_BACKGROUND_FEATHER_RATIO = float(os.getenv("LOCAL_BACKGROUND_FEATHER_RATIO", "0.045"))
+# The round halo behind a video note has no feather knob: only the ring
+# between the circle and the halo edge is ever visible, and its width follows
+# from CIRCLE_SIZE_RATIO and the frame, so the fade is derived from that ring
+# instead. See create_soft_circle_mask().
+#
 # Feathering of the square backdrop behind a regular video. The square matches
 # the circle, so only its corners show: the fade has to reach zero alpha right
 # at the square's border and be back to full by the time it meets the circle.

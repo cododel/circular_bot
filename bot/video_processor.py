@@ -27,7 +27,6 @@ from bot.config import (
     LOCAL_BACKGROUND_BLUR,
     LOCAL_BACKGROUND_BRIGHTNESS,
     LOCAL_BACKGROUND_CONTRAST,
-    LOCAL_BACKGROUND_FEATHER_RATIO,
     LOCAL_BACKGROUND_OPACITY,
     LOCAL_BACKGROUND_SIZE_RATIO,
     LOCAL_BACKGROUND_SQUARE_FEATHER_RATIO,
@@ -455,12 +454,25 @@ def create_soft_square_mask(size: int, output_path: Optional[str] = None) -> str
     return output_path
 
 
-def create_soft_circle_mask(size: int, output_path: Optional[str] = None) -> str:
+def create_soft_circle_mask(
+    size: int,
+    circle_size: int,
+    output_path: Optional[str] = None,
+) -> str:
     """Create a softly feathered round mask for the local background layer.
 
     A video note is round, so a square backdrop would draw a square silhouette
     around it — exactly the shape Telegram's own white mask leaves behind. The
     circular halo fades into the ambient layer instead.
+
+    Only the ring between the circle and the halo's own edge is ever visible,
+    and how wide that ring is depends on the circle size and the frame, so the
+    fade is derived from it rather than from a fixed ratio: the gradient is
+    centred on the middle of the ring and spans it at three sigma either way.
+    That keeps the halo at full strength where it meets the circle and at zero
+    alpha on its border no matter how thin the ring gets — a fade measured
+    against the halo diameter instead collapses under the circle and vanishes
+    as soon as the circle grows.
     """
     if output_path is None:
         output_path = _temporary_png_path("local_mask")
@@ -468,25 +480,30 @@ def create_soft_circle_mask(size: int, output_path: Optional[str] = None) -> str
     size = _even(size)
     opacity = max(0.0, min(1.0, LOCAL_BACKGROUND_OPACITY))
     maximum = int(round(255 * opacity))
-    feather = max(2, int(round(size * LOCAL_BACKGROUND_FEATHER_RATIO)))
+
+    circle_radius = min(_even(circle_size), size) / 2.0
+    ring = max(1.0, size / 2.0 - circle_radius)
+    core_radius = circle_radius + ring / 2.0
+    sigma = max(1.0, ring / 6.0)
 
     mask = Image.new("L", (size, size), 0)
     draw = ImageDraw.Draw(mask)
-    inset = max(1, feather)
+    inset = size / 2.0 - core_radius
     draw.ellipse((inset, inset, size - inset - 1, size - inset - 1), fill=maximum)
-    mask = mask.filter(ImageFilter.GaussianBlur(radius=max(1.0, feather / 2.0)))
+    mask = mask.filter(ImageFilter.GaussianBlur(radius=sigma))
     mask.save(output_path)
     return output_path
 
 
 def create_local_backdrop_mask(
     size: int,
+    circle_size: int,
     source_kind: str,
     output_path: Optional[str] = None,
 ) -> str:
     """Pick the backdrop silhouette that matches the source geometry."""
     if source_kind == VIDEO_NOTE_KIND:
-        return create_soft_circle_mask(size, output_path)
+        return create_soft_circle_mask(size, circle_size, output_path)
     return create_soft_square_mask(size, output_path)
 
 
@@ -733,7 +750,11 @@ async def process_video_async(
             circle_size,
             source_kind,
         )
-        local_mask = create_local_backdrop_mask(backdrop_size, source_kind)
+        local_mask = create_local_backdrop_mask(
+            backdrop_size,
+            circle_size,
+            source_kind,
+        )
         generated_files.append(local_mask)
 
         filter_complex = _build_filter_complex(

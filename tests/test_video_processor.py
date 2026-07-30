@@ -324,16 +324,22 @@ def test_video_note_halo_still_extends_past_the_circle() -> None:
 
 def test_video_note_backdrop_mask_is_round(tmp_path: Path) -> None:
     """A square halo would redraw the silhouette we are removing."""
-    size = 340
+    size, circle_size = 340, 300
     round_mask = tmp_path / "round.png"
     square_mask = tmp_path / "square.png"
 
     video_processor.create_local_backdrop_mask(
         size,
+        circle_size,
         video_processor.VIDEO_NOTE_KIND,
         str(round_mask),
     )
-    video_processor.create_local_backdrop_mask(size, "video", str(square_mask))
+    video_processor.create_local_backdrop_mask(
+        size,
+        circle_size,
+        "video",
+        str(square_mask),
+    )
 
     expected_center = round(255 * LOCAL_BACKGROUND_OPACITY)
     with Image.open(round_mask) as mask:
@@ -346,6 +352,26 @@ def test_video_note_backdrop_mask_is_round(tmp_path: Path) -> None:
         # The square keeps its corners — that is the only part of it on show,
         # and it is exactly where the round halo has nothing.
         assert mask.getpixel((size // 4, size // 4)) > 0
+
+
+@pytest.mark.parametrize("ring", [8, 26, 60])
+def test_round_halo_survives_any_ring_width(tmp_path: Path, ring: int) -> None:
+    """The ring narrows as the circle grows; the glow has to hold up anyway."""
+    size = 720
+    circle_size = size - 2 * ring
+    mask_path = tmp_path / f"halo_{ring}.png"
+    video_processor.create_soft_circle_mask(size, circle_size, str(mask_path))
+
+    opaque = round(255 * LOCAL_BACKGROUND_OPACITY)
+    centre = size // 2
+
+    with Image.open(mask_path) as mask:
+        # Full strength where it meets the circle, so the glow is not a faint
+        # smear left over from a fade measured against the halo diameter.
+        assert mask.getpixel((centre - circle_size // 2 + 1, centre)) >= opaque * 0.95
+        # ...and gone by its own border, so the halo draws no hard outline.
+        assert mask.getpixel((0, centre)) == 0
+        assert mask.getpixel((centre, 0)) == 0
 
 
 @pytest.mark.parametrize(
