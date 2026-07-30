@@ -17,6 +17,20 @@ def get_aspect_ratio_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
+def get_video_mode_keyboard() -> InlineKeyboardMarkup:
+    """Return keyboard choosing between a plain circle and the full overlay."""
+    buttons = [
+        [InlineKeyboardButton(text="⭕ Просто кружок", callback_data="mode_circle")],
+        [
+            InlineKeyboardButton(
+                text="🎨 Обработать с оверлеем",
+                callback_data="mode_overlay",
+            )
+        ],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
 def get_username_source_keyboard(
     original_author: str | None = None,
     sender: str | None = None

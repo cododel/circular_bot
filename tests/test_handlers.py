@@ -101,6 +101,80 @@ def test_size_limit_can_be_disabled(monkeypatch) -> None:
     assert handlers.exceeds_size_limit(2 * 1024 * 1024 * 1024) is False
 
 
+class FakeState:
+    """Minimal stand-in for aiogram's FSMContext."""
+
+    def __init__(self) -> None:
+        self.data: dict = {}
+        self.state = None
+
+    async def update_data(self, **values) -> dict:
+        self.data.update(values)
+        return self.data
+
+    async def get_data(self) -> dict:
+        return self.data
+
+    async def set_state(self, state) -> None:
+        self.state = state
+
+
+class FakeMessage(SimpleNamespace):
+    """Message stand-in that records what the bot answered."""
+
+    def __init__(self, **attachments) -> None:
+        payload = {
+            "video_note": None,
+            "video": None,
+            "document": None,
+            "forward_origin": None,
+            "forward_from": None,
+            "forward_sender_name": None,
+            "from_user": SimpleNamespace(id=1, username="cododel", full_name="Alex"),
+        }
+        payload.update(attachments)
+        super().__init__(**payload)
+        self.answers: list = []
+
+    async def answer(self, text, reply_markup=None, **_kwargs) -> None:
+        self.answers.append((text, reply_markup))
+
+
+def callback_data(markup) -> list[str]:
+    return [button.callback_data for row in markup.inline_keyboard for button in row]
+
+
+def test_regular_video_offers_the_plain_circle_choice() -> None:
+    message = FakeMessage(
+        video=SimpleNamespace(file_id="video-1", duration=12, file_size=1_000_000)
+    )
+    state = FakeState()
+
+    asyncio.run(handlers.handle_video(message, state))
+
+    assert state.state == handlers.ProcessingState.waiting_for_mode
+    text, markup = message.answers[-1]
+    assert callback_data(markup) == ["mode_circle", "mode_overlay"]
+    assert "Что с ним сделать?" in text
+    # The signature candidates are resolved up front, while the original
+    # message is still at hand: the callback only sees the bot's own message.
+    assert state.data["sender_username"] == "@cododel"
+
+
+def test_video_note_skips_the_mode_choice() -> None:
+    message = FakeMessage(
+        video_note=SimpleNamespace(file_id="note-1", duration=12, file_size=900_000)
+    )
+    state = FakeState()
+
+    asyncio.run(handlers.handle_video(message, state))
+
+    # A video note is already a circle, so only the overlay path makes sense.
+    assert state.state == handlers.ProcessingState.waiting_for_username_source
+    _text, markup = message.answers[-1]
+    assert callback_data(markup) == ["username_sender", "username_custom"]
+
+
 def test_probe_duration_returns_zero_for_unreadable_input(tmp_path: Path) -> None:
     missing = tmp_path / "missing.mp4"
 

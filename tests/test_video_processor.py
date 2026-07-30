@@ -27,6 +27,9 @@ from bot.config import (
     TEXT_FRAME_MARGIN_RATIO,
     TEXT_MIN_FONT_SIZE_RATIO,
     VIDEO_NOTE_EDGE_TRIM,
+    VIDEO_NOTE_MAX_DURATION,
+    VIDEO_NOTE_MAX_SIZE,
+    VIDEO_NOTE_OUTPUT_SIZE,
     VIDEO_NOTE_SAFE_CROP,
 )
 
@@ -454,6 +457,182 @@ def test_ffmpeg_integration_and_generated_file_cleanup(
     assert not list(tmp_path.glob("text_overlay_*.png"))
     assert not list(tmp_path.glob("circle_mask_*.png"))
     assert not list(tmp_path.glob("local_mask_*.png"))
+
+
+def test_circle_filter_crops_the_center_square() -> None:
+    graph = video_processor._build_circle_filter(512)
+
+    # Cover the square by the shorter side, then cut the longer one — no pad,
+    # so the result is never letterboxed.
+    assert "scale=512:512:force_original_aspect_ratio=increase" in graph
+    assert "crop=512:512" in graph
+    assert graph.endswith("format=yuv420p")
+    # The plain path draws nothing on its own: Telegram masks the note itself.
+    assert "overlay" not in graph
+    assert "gblur" not in graph
+
+
+def test_circle_output_size_stays_within_telegram_limits(monkeypatch) -> None:
+    assert video_processor.circle_output_size() == VIDEO_NOTE_OUTPUT_SIZE
+
+    monkeypatch.setattr(video_processor, "VIDEO_NOTE_OUTPUT_SIZE", 1080)
+    assert video_processor.circle_output_size() == VIDEO_NOTE_MAX_SIZE
+
+    # h264 needs even dimensions.
+    monkeypatch.setattr(video_processor, "VIDEO_NOTE_OUTPUT_SIZE", 385)
+    assert video_processor.circle_output_size() == 384
+
+
+@pytest.mark.parametrize(
+    ("duration", "trimmed"),
+    [
+        (30.0, False),
+        (60.0, False),
+        (90.0, True),
+        # An unreadable duration is trimmed too: an over-long round message is
+        # rejected outright, a trimmed one always goes through.
+        (0.0, True),
+    ],
+)
+def test_circle_trim_args_follow_the_duration_limit(
+    duration: float,
+    trimmed: bool,
+) -> None:
+    args = video_processor.circle_trim_args(duration)
+
+    assert args == (["-t", f"{VIDEO_NOTE_MAX_DURATION:g}"] if trimmed else [])
+
+
+def test_circle_progress_is_measured_against_the_trimmed_length() -> None:
+    # A trimmed source encodes only up to the limit, so measuring against the
+    # raw duration would leave the percentage stuck below 100.
+    assert video_processor.circle_progress_duration(90.0) == VIDEO_NOTE_MAX_DURATION
+    assert video_processor.circle_progress_duration(12.0) == 12.0
+    assert video_processor.circle_progress_duration(0.0) == 0.0
+
+
+@pytest.mark.parametrize(
+    ("source_size", "source_label"),
+    [
+        ("256x256", "square video"),
+        ("320x180", "landscape video"),
+        ("180x320", "portrait video"),
+    ],
+)
+def test_circle_output_is_square_and_reports_progress(
+    tmp_path: Path,
+    source_size: str,
+    source_label: str,
+) -> None:
+    ffmpeg = shutil.which("ffmpeg")
+    ffprobe = shutil.which("ffprobe")
+    if not ffmpeg or not ffprobe:
+        pytest.skip("FFmpeg tools are not installed")
+
+    source = tmp_path / "source.mp4"
+    output = tmp_path / "circle.mp4"
+
+    subprocess.run(
+        [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"testsrc2=size={source_size}:rate=8:duration=0.5",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(source),
+        ],
+        check=True,
+    )
+
+    reported: list[int] = []
+
+    async def report(percent: int) -> None:
+        reported.append(percent)
+
+    asyncio.run(
+        video_processor.process_circle_async(
+            str(source),
+            str(output),
+            progress_callback=report,
+            video_duration=0.5,
+        )
+    )
+
+    assert output.exists() and output.stat().st_size > 0
+    metadata = subprocess.run(
+        [
+            ffprobe,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "json",
+            str(output),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    stream = json.loads(metadata.stdout)["streams"][0]
+    side = video_processor.circle_output_size()
+    assert stream == {"width": side, "height": side}
+
+    assert reported and reported[-1] == 100
+
+
+def test_circle_trims_a_long_source(tmp_path: Path, monkeypatch) -> None:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg or not shutil.which("ffprobe"):
+        pytest.skip("FFmpeg tools are not installed")
+
+    monkeypatch.setattr(video_processor, "VIDEO_NOTE_MAX_DURATION", 1.0)
+    source = tmp_path / "long.mp4"
+    output = tmp_path / "trimmed.mp4"
+
+    subprocess.run(
+        [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x180:rate=8:duration=4",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(source),
+        ],
+        check=True,
+    )
+
+    assert video_processor.exceeds_circle_duration(4.0) is True
+
+    asyncio.run(
+        video_processor.process_circle_async(
+            str(source),
+            str(output),
+            video_duration=4.0,
+        )
+    )
+
+    assert asyncio.run(video_processor.probe_duration(str(output))) == pytest.approx(
+        1.0, abs=0.3
+    )
 
 
 def test_probe_duration_reads_a_real_file(tmp_path: Path) -> None:

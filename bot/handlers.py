@@ -11,10 +11,18 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 from bot.config import MAX_VIDEO_SIZE_BYTES, TEMP_DIR, ALLOWED_USERS
-from bot.keyboards import get_aspect_ratio_keyboard, get_username_source_keyboard
+from bot.keyboards import (
+    get_aspect_ratio_keyboard,
+    get_username_source_keyboard,
+    get_video_mode_keyboard,
+)
 from bot.video_processor import (
+    circle_max_duration,
+    circle_output_size,
     cleanup_temp_files,
+    exceeds_circle_duration,
     probe_duration,
+    process_circle_async,
     process_video_async,
 )
 
@@ -23,7 +31,7 @@ router = Router()
 
 SEND_VIDEO_HINT = (
     "Пришли кружок (video note) или обычное видео — "
-    "у обычного видео я возьму центральный квадрат и замаскирую его в круг."
+    "обычное я могу просто обрезать в кружок или обработать с оверлеем."
 )
 
 
@@ -36,6 +44,7 @@ def is_user_allowed(user_id: int) -> bool:
 
 class ProcessingState(StatesGroup):
     """States for video processing flow."""
+    waiting_for_mode = State()  # Plain circle or the full overlay pipeline
     waiting_for_ratio = State()
     waiting_for_text = State()
     waiting_for_username_source = State()  # NEW: Choose username source
@@ -174,11 +183,13 @@ async def cmd_start(message: Message):
     
     await message.answer(
         "👋 Привет! Я бот для обработки видео Telegram.\n\n"
-        "Отправь мне кружок (video note) или обычное видео, и я сделаю:\n"
-        "• Круглую маску по центру кадра\n"
-        "• Размытый ambient background\n"
-        "• Подпись по дуге круга\n\n"
-        "Готовый результат можно скачать в разных форматах (9:16, 1:1, 16:9, 4:5)."
+        "Отправь обычное видео — предложу два варианта:\n"
+        "• ⭕ <b>Просто кружок</b> — обрежу центральный квадрат "
+        "и верну готовый video note\n"
+        "• 🎨 <b>С оверлеем</b> — круглая маска по центру кадра, "
+        "размытый ambient background и подпись по дуге "
+        "в формате 9:16, 1:1, 16:9 или 4:5\n\n"
+        "Кружок (video note) сразу идёт по второму пути."
     )
 
 
@@ -213,10 +224,10 @@ async def handle_video(message: Message, state: FSMContext):
 
     # Get usernames
     sender = get_username_from_user(message.from_user)
-    
+
     # Try to get original author from forwarded message
     original_author = None
-    
+
     # Check forward_origin (for channels)
     if message.forward_origin:
         if message.forward_origin.type == "channel":
@@ -230,32 +241,161 @@ async def handle_video(message: Message, state: FSMContext):
             # Forwarded from user
             sender_user = message.forward_origin.sender_user
             original_author = get_username_from_user(sender_user)
-    
+
     # Fallback to old fields (for compatibility)
     if not original_author:
         if message.forward_from:
             original_author = get_username_from_user(message.forward_from)
         elif message.forward_sender_name:
             original_author = message.forward_sender_name
-    
+
     # Store both for later use
     await state.update_data(
         sender_username=sender,
         original_author=original_author,
     )
-    
-    # Show keyboard to choose source
+
+    # A video note is already a circle, so the plain path has nothing to offer
+    # there: only regular videos get the choice.
+    if source.kind != "video_note":
+        await message.answer(
+            f"{RECEIVED_PHRASES[source.kind]}\n\nЧто с ним сделать?",
+            reply_markup=get_video_mode_keyboard(),
+        )
+        await state.set_state(ProcessingState.waiting_for_mode)
+        return
+
+    await prompt_username_source(
+        message,
+        state,
+        header=RECEIVED_PHRASES[source.kind],
+    )
+
+
+async def prompt_username_source(
+    target: Message,
+    state: FSMContext,
+    header: str,
+    edit: bool = False,
+) -> None:
+    """Ask which username should be used for the signature.
+
+    Reached either straight from a video note or from the mode keyboard, so the
+    prompt can replace the bot's own message instead of adding another one.
+    """
+    data = await state.get_data()
     keyboard = get_username_source_keyboard(
-        original_author=original_author,
-        sender=sender
+        original_author=data.get("original_author"),
+        sender=data.get("sender_username"),
     )
-    
-    await message.answer(
-        f"{RECEIVED_PHRASES[source.kind]}\n\n"
-        "Выбери, чей юзернейм использовать для подписи:",
-        reply_markup=keyboard
-    )
+
+    text = f"{header}\n\nВыбери, чей юзернейм использовать для подписи:"
+    if edit:
+        await target.edit_text(text, reply_markup=keyboard)
+    else:
+        await target.answer(text, reply_markup=keyboard)
+
     await state.set_state(ProcessingState.waiting_for_username_source)
+
+
+@router.callback_query(ProcessingState.waiting_for_mode, F.data == "mode_overlay")
+async def handle_overlay_mode(callback: CallbackQuery, state: FSMContext):
+    """Continue into the full pipeline: signature, format, ambient render."""
+    await callback.answer("Обработка с оверлеем")
+    await prompt_username_source(
+        callback.message,
+        state,
+        header="🎨 Обработка с оверлеем",
+        edit=True,
+    )
+
+
+@router.callback_query(ProcessingState.waiting_for_mode, F.data == "mode_circle")
+async def handle_circle_mode(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    """Crop the video to its center square and send it back as a video note."""
+    await callback.answer("Делаю кружок")
+
+    data = await state.get_data()
+    file_id = data.get("source_file_id")
+    video_duration = float(data.get("source_duration") or 0.0)
+
+    temp_input = None
+    temp_output = None
+    progress_message = None
+
+    try:
+        await callback.message.edit_text("⏳ Загружаю видео...")
+
+        job_id = uuid.uuid4().hex
+        temp_input = os.path.join(TEMP_DIR, f"input_{job_id}.mp4")
+        temp_output = os.path.join(TEMP_DIR, f"circle_{job_id}.mp4")
+
+        file = await bot.get_file(file_id)
+        await bot.download_file(file.file_path, temp_input)
+
+        # Documents arrive without a duration, and the trimming notice needs it.
+        if video_duration <= 0:
+            video_duration = await probe_duration(temp_input)
+
+        limit = circle_max_duration()
+        trimmed = exceeds_circle_duration(video_duration)
+        notice = ""
+        if trimmed:
+            notice = (
+                f"\n✂️ Видео длиннее {limit:g} с — "
+                "кружком уйдёт только начало."
+            )
+
+        async def report_progress(percent: int):
+            nonlocal progress_message
+            try:
+                text = f"⏳ Делаю кружок: {percent}%{notice}"
+                if progress_message is None:
+                    progress_message = await callback.message.edit_text(text)
+                else:
+                    await progress_message.edit_text(text)
+            except Exception:
+                pass  # Ignore edit errors
+
+        await process_circle_async(
+            input_path=temp_input,
+            output_path=temp_output,
+            progress_callback=report_progress,
+            video_duration=video_duration,
+        )
+
+        # An unknown duration is left to Telegram rather than guessed at.
+        sent_duration = int(min(video_duration, limit)) if video_duration > 0 else None
+        await callback.message.answer_video_note(
+            video_note=FSInputFile(temp_output),
+            length=circle_output_size(),
+            duration=sent_duration,
+        )
+        if trimmed:
+            await callback.message.answer(
+                f"✂️ Исходное видео длиннее {limit:g} с, "
+                "поэтому в кружок попала только первая часть."
+            )
+
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+
+    except Exception as e:
+        error_msg = html.escape(str(e))
+        await callback.message.edit_text(
+            f"❌ Ошибка при обработке видео:\n<pre>{error_msg}</pre>"
+        )
+    finally:
+        cleanup_temp_files(temp_input, temp_output)
+        await state.clear()
+
+
+@router.callback_query(ProcessingState.waiting_for_mode)
+async def ignore_other_mode_callbacks(callback: CallbackQuery):
+    """Ignore unexpected callbacks in mode selection."""
+    await callback.answer("Пожалуйста, выбери вариант из списка")
 
 
 @router.callback_query(ProcessingState.waiting_for_username_source, F.data == "username_original")
