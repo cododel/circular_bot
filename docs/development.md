@@ -63,6 +63,9 @@ cp .env.example .env
 | `AMBIENT_SATURATION` | Насыщенность ambient-фона | 1.30 |
 | `AMBIENT_SMOOTHING_FRAMES` | Окно временного сглаживания, кадров (1 = выкл) | 10 |
 | `AMBIENT_SMOOTHING_ALPHA` | Вес текущего кадра в EMA | 0.25 |
+| `LOCAL_BACKGROUND_SQUARE_FEATHER_RATIO` | Мягкость границы квадратной подложки (обычное видео) | 0.09 |
+| `LOCAL_BACKGROUND_FEATHER_RATIO` | Мягкость круглого ореола (кружок) | 0.045 |
+| `LOCAL_BACKGROUND_SIZE_RATIO` | Размер круглого ореола относительно кружка | 1.14 |
 | `VIDEO_NOTE_SAFE_CROP` | Доля кадра кружка, гарантированно внутри круга (≤ 0.707) | 0.70 |
 | `VIDEO_NOTE_EDGE_TRIM` | Обрезка каймы белой маски Telegram | 0.985 |
 | `TEXT_FONT_SIZE_RATIO` | Верхний размер шрифта подписи относительно кружка | 0.085 |

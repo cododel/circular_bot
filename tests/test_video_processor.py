@@ -134,6 +134,28 @@ def test_text_overlay_is_unique_and_outside_clear_circle(tmp_path: Path, monkeyp
         assert minimum_opaque_distance > visible_radius
 
 
+def test_square_backdrop_fades_to_nothing_at_its_own_border(tmp_path: Path) -> None:
+    """A border that starts at partial alpha draws a hard line around the square."""
+    size = 590
+    mask_path = tmp_path / "square.png"
+    video_processor.create_soft_square_mask(size, str(mask_path))
+
+    with Image.open(mask_path) as mask:
+        border = [mask.getpixel((x, 0)) for x in range(0, size, 20)]
+        border += [mask.getpixel((0, y)) for y in range(0, size, 20)]
+        assert max(border) == 0
+
+        # ...and it is back to full opacity by the time it reaches the circle,
+        # so the backdrop still meets the circle content flush at the corners.
+        circle_edge = int(round(size * (2**0.5 - 1) / 2 / 2**0.5))
+        opaque = round(255 * LOCAL_BACKGROUND_OPACITY)
+        assert mask.getpixel((circle_edge, circle_edge)) >= opaque * 0.9
+
+        # The fade in between is gradual rather than a couple of steps.
+        profile = [mask.getpixel((d, d)) for d in range(0, circle_edge)]
+        assert max(b - a for a, b in zip(profile, profile[1:])) < opaque * 0.1
+
+
 def test_circle_and_local_masks_are_antialiased(tmp_path: Path) -> None:
     circle_path = tmp_path / "circle.png"
     local_path = tmp_path / "local.png"
@@ -321,7 +343,9 @@ def test_video_note_backdrop_mask_is_round(tmp_path: Path) -> None:
         assert mask.getpixel((12, 12)) == 0
 
     with Image.open(square_mask) as mask:
-        assert mask.getpixel((12, 12)) > 0
+        # The square keeps its corners — that is the only part of it on show,
+        # and it is exactly where the round halo has nothing.
+        assert mask.getpixel((size // 4, size // 4)) > 0
 
 
 @pytest.mark.parametrize(

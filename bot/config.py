@@ -52,7 +52,17 @@ LOCAL_BACKGROUND_BLUR = float(os.getenv("LOCAL_BACKGROUND_BLUR", "7"))
 LOCAL_BACKGROUND_BRIGHTNESS = float(os.getenv("LOCAL_BACKGROUND_BRIGHTNESS", "-0.10"))
 LOCAL_BACKGROUND_CONTRAST = float(os.getenv("LOCAL_BACKGROUND_CONTRAST", "1.03"))
 LOCAL_BACKGROUND_OPACITY = float(os.getenv("LOCAL_BACKGROUND_OPACITY", "0.90"))
+# Feathering of the round halo behind a video note. It is a thin ring outside
+# the circle, so it stays opaque where it meets the circle and fades over the
+# ring width.
 LOCAL_BACKGROUND_FEATHER_RATIO = float(os.getenv("LOCAL_BACKGROUND_FEATHER_RATIO", "0.045"))
+# Feathering of the square backdrop behind a regular video. The square matches
+# the circle, so only its corners show: the fade has to reach zero alpha right
+# at the square's border and be back to full by the time it meets the circle.
+# That needs a much wider band than the halo above — hence a separate ratio.
+LOCAL_BACKGROUND_SQUARE_FEATHER_RATIO = float(
+    os.getenv("LOCAL_BACKGROUND_SQUARE_FEATHER_RATIO", "0.09")
+)
 
 # Video notes carry Telegram's white round mask baked into the file: outside
 # the inscribed circle every frame is pure white. Only the inner circle may

@@ -30,6 +30,7 @@ from bot.config import (
     LOCAL_BACKGROUND_FEATHER_RATIO,
     LOCAL_BACKGROUND_OPACITY,
     LOCAL_BACKGROUND_SIZE_RATIO,
+    LOCAL_BACKGROUND_SQUARE_FEATHER_RATIO,
     PROCESSING_TIMEOUT,
     PROGRESS_UPDATE_INTERVAL,
     TEMP_DIR,
@@ -423,25 +424,33 @@ def create_circle_mask(size: int, output_path: Optional[str] = None) -> str:
 
 
 def create_soft_square_mask(size: int, output_path: Optional[str] = None) -> str:
-    """Create a softly feathered square mask for the local background layer."""
+    """Create a softly feathered square mask for the local background layer.
+
+    The square is the same size as the clear circle, so only its corners show
+    and its border has to reach zero alpha exactly at the frame edge. Insetting
+    the opaque core by a full feather puts that edge three sigma out, where the
+    Gaussian tail has died: fading over half a feather instead would leave the
+    border stepping straight from nothing to a quarter opacity, which reads as
+    a hard line around the square.
+    """
     if output_path is None:
         output_path = _temporary_png_path("local_mask")
 
     size = _even(size)
     opacity = max(0.0, min(1.0, LOCAL_BACKGROUND_OPACITY))
     maximum = int(round(255 * opacity))
-    feather = max(2, int(round(size * LOCAL_BACKGROUND_FEATHER_RATIO)))
+    feather = max(2, int(round(size * LOCAL_BACKGROUND_SQUARE_FEATHER_RATIO)))
 
     mask = Image.new("L", (size, size), 0)
     draw = ImageDraw.Draw(mask)
-    inset = max(1, feather // 2)
+    inset = max(1, feather)
     radius = max(2, int(round(size * 0.035)))
     draw.rounded_rectangle(
         (inset, inset, size - inset - 1, size - inset - 1),
         radius=radius,
         fill=maximum,
     )
-    mask = mask.filter(ImageFilter.GaussianBlur(radius=max(1.0, feather / 2.0)))
+    mask = mask.filter(ImageFilter.GaussianBlur(radius=max(1.0, feather / 3.0)))
     mask.save(output_path)
     return output_path
 
