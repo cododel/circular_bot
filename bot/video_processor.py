@@ -42,6 +42,9 @@ from bot.config import (
     TEXT_PADDING_RATIO,
     TEXT_TRACKING_RATIO,
     VIDEO_NOTE_EDGE_TRIM,
+    VIDEO_NOTE_MAX_DURATION,
+    VIDEO_NOTE_MAX_SIZE,
+    VIDEO_NOTE_OUTPUT_SIZE,
     VIDEO_NOTE_SAFE_CROP,
     ZOOM_SCALE,
 )
@@ -706,6 +709,207 @@ def _build_filter_complex(
     )
 
 
+async def _run_ffmpeg_with_progress(
+    cmd: list[str],
+    video_duration: float = 0.0,
+    progress_callback: Optional[Callable[[int], Awaitable[None]]] = None,
+) -> None:
+    """Run an FFmpeg command, streaming its ``-progress`` output to a callback.
+
+    Both rendering paths share this: the process must not block the event loop,
+    the progress percentage comes from stderr, and a failure has to carry the
+    tail of the FFmpeg log instead of a bare exit code.
+    """
+    process = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+    last_update_time = 0.0
+    last_reported_progress = -1
+    stderr_tail: deque[str] = deque(maxlen=40)
+
+    async def read_stderr() -> None:
+        nonlocal last_update_time, last_reported_progress
+        assert process.stderr is not None
+
+        while True:
+            raw_line = await process.stderr.readline()
+            if not raw_line:
+                break
+            line = raw_line.decode("utf-8", errors="ignore").strip()
+            if line:
+                stderr_tail.append(line)
+
+            if "[libx264" in line or "encoded" in line:
+                if "cpu capabilities" in line:
+                    logger.info("FFmpeg CPU: %s", line.split("cpu capabilities:")[-1].strip())
+                elif "threads=" in line:
+                    threads_match = re.search(r"threads=(\d+)", line)
+                    lookahead_match = re.search(r"lookahead_threads=(\d+)", line)
+                    crf_match = re.search(r"crf=([\d.]+)", line)
+                    logger.info(
+                        "FFmpeg config: threads=%s (lookahead=%s), CRF=%s",
+                        threads_match.group(1) if threads_match else "?",
+                        lookahead_match.group(1) if lookahead_match else "?",
+                        crf_match.group(1) if crf_match else "?",
+                    )
+
+            if progress_callback and video_duration > 0:
+                progress = parse_ffmpeg_progress(line, video_duration)
+                if progress is None:
+                    continue
+
+                progress_int = int(progress)
+                current_time = time.time()
+                if current_time - last_update_time >= PROGRESS_UPDATE_INTERVAL:
+                    last_update_time = current_time
+                    last_reported_progress = progress_int
+                    try:
+                        await progress_callback(progress_int)
+                    except Exception:
+                        logger.debug("Progress callback failed", exc_info=True)
+
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(process.wait(), read_stderr()),
+            timeout=PROCESSING_TIMEOUT,
+        )
+    except asyncio.TimeoutError as exc:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+        raise RuntimeError(
+            f"Processing timeout after {PROCESSING_TIMEOUT} seconds"
+        ) from exc
+    except asyncio.CancelledError:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+        raise
+
+    if process.returncode != 0:
+        details = "\n".join(stderr_tail)[-2500:]
+        raise RuntimeError(f"FFmpeg failed (code {process.returncode}): {details}")
+
+    if progress_callback and last_reported_progress < 100:
+        try:
+            await progress_callback(100)
+        except Exception:
+            logger.debug("Final progress callback failed", exc_info=True)
+
+
+def circle_output_size() -> int:
+    """Side of an outgoing video note, clamped to what Telegram accepts."""
+    return _even(min(VIDEO_NOTE_OUTPUT_SIZE, VIDEO_NOTE_MAX_SIZE), minimum=16)
+
+
+def circle_max_duration() -> float:
+    """Longest video note Telegram will take, in seconds."""
+    return max(1.0, VIDEO_NOTE_MAX_DURATION)
+
+
+def exceeds_circle_duration(video_duration: float) -> bool:
+    """Whether a source has to be trimmed to fit into a video note."""
+    return video_duration > circle_max_duration()
+
+
+def circle_trim_args(video_duration: float) -> list[str]:
+    """``-t`` arguments that cut a long source down to the Telegram limit.
+
+    An unknown duration (0.0, e.g. a document ffprobe could not read) is capped
+    as well: sending a 10-minute round message fails, a trimmed one does not.
+    """
+    limit = circle_max_duration()
+    if video_duration <= 0 or video_duration > limit:
+        return ["-t", f"{limit:g}"]
+    return []
+
+
+def circle_progress_duration(video_duration: float) -> float:
+    """Duration the progress percentage is measured against.
+
+    A trimmed source encodes only up to the limit, so the raw duration would
+    leave the percentage stuck well below 100.
+    """
+    if video_duration <= 0:
+        return 0.0
+    return min(video_duration, circle_max_duration())
+
+
+def _build_circle_filter(size: int) -> str:
+    """Center square of the frame, blown up to the video note square.
+
+    Same idiom as the layered path: upscale with ``increase`` so the shorter
+    side covers the square, then cut the overflow off the longer one.
+    """
+    return (
+        f"scale={size}:{size}:force_original_aspect_ratio=increase,"
+        f"crop={size}:{size},setsar=1,format=yuv420p"
+    )
+
+
+async def process_circle_async(
+    input_path: str,
+    output_path: str,
+    progress_callback: Optional[Callable[[int], Awaitable[None]]] = None,
+    video_duration: float = 0.0,
+) -> str:
+    """Crop a video to its center square and encode it as a Telegram video note.
+
+    No ambient, backdrop, mask or signature: Telegram renders the round mask on
+    its own, so anything we drew here would only be thrown away.
+    """
+    started_at = time.time()
+    size = circle_output_size()
+
+    logger.info(
+        "Starting circle processing: %s -> %s (%sx%s)",
+        input_path,
+        output_path,
+        size,
+        size,
+    )
+
+    cmd = ["ffmpeg", "-y"]
+    if FFMPEG_THREADS > 0:
+        cmd.extend(["-threads", str(FFMPEG_THREADS)])
+
+    cmd.extend(["-progress", "pipe:2", "-i", input_path])
+    cmd.extend(circle_trim_args(video_duration))
+    cmd.extend(
+        [
+            "-vf",
+            _build_circle_filter(size),
+            "-c:v",
+            "libx264",
+            "-preset",
+            "fast",
+            "-crf",
+            "23",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-movflags",
+            "+faststart",
+            output_path,
+        ]
+    )
+
+    await _run_ffmpeg_with_progress(
+        cmd,
+        video_duration=circle_progress_duration(video_duration),
+        progress_callback=progress_callback,
+    )
+
+    logger.info("Circle processing completed in %.1fs", time.time() - started_at)
+    return output_path
+
+
 async def process_video_async(
     input_path: str,
     output_path: str,
@@ -730,7 +934,6 @@ async def process_video_async(
     )
 
     generated_files: list[str] = []
-    process: Optional[asyncio.subprocess.Process] = None
 
     try:
         text_overlay = create_text_overlay(
@@ -804,89 +1007,15 @@ async def process_video_async(
             ]
         )
 
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
+        await _run_ffmpeg_with_progress(
+            cmd,
+            video_duration=video_duration,
+            progress_callback=progress_callback,
         )
-
-        last_update_time = 0.0
-        last_reported_progress = -1
-        stderr_tail: deque[str] = deque(maxlen=40)
-
-        async def read_stderr() -> None:
-            nonlocal last_update_time, last_reported_progress
-            assert process is not None and process.stderr is not None
-
-            while True:
-                raw_line = await process.stderr.readline()
-                if not raw_line:
-                    break
-                line = raw_line.decode("utf-8", errors="ignore").strip()
-                if line:
-                    stderr_tail.append(line)
-
-                if "[libx264" in line or "encoded" in line:
-                    if "cpu capabilities" in line:
-                        logger.info("FFmpeg CPU: %s", line.split("cpu capabilities:")[-1].strip())
-                    elif "threads=" in line:
-                        threads_match = re.search(r"threads=(\d+)", line)
-                        lookahead_match = re.search(r"lookahead_threads=(\d+)", line)
-                        crf_match = re.search(r"crf=([\d.]+)", line)
-                        logger.info(
-                            "FFmpeg config: threads=%s (lookahead=%s), CRF=%s",
-                            threads_match.group(1) if threads_match else "?",
-                            lookahead_match.group(1) if lookahead_match else "?",
-                            crf_match.group(1) if crf_match else "?",
-                        )
-
-                if progress_callback and video_duration > 0:
-                    progress = parse_ffmpeg_progress(line, video_duration)
-                    if progress is None:
-                        continue
-
-                    progress_int = int(progress)
-                    current_time = time.time()
-                    if current_time - last_update_time >= PROGRESS_UPDATE_INTERVAL:
-                        last_update_time = current_time
-                        last_reported_progress = progress_int
-                        try:
-                            await progress_callback(progress_int)
-                        except Exception:
-                            logger.debug("Progress callback failed", exc_info=True)
-
-        await asyncio.wait_for(
-            asyncio.gather(process.wait(), read_stderr()),
-            timeout=PROCESSING_TIMEOUT,
-        )
-
-        if process.returncode != 0:
-            details = "\n".join(stderr_tail)[-2500:]
-            raise RuntimeError(
-                f"FFmpeg failed (code {process.returncode}): {details}"
-            )
-
-        if progress_callback and last_reported_progress < 100:
-            try:
-                await progress_callback(100)
-            except Exception:
-                logger.debug("Final progress callback failed", exc_info=True)
 
         logger.info("Video processing completed in %.1fs", time.time() - started_at)
         return output_path
 
-    except asyncio.TimeoutError as exc:
-        if process and process.returncode is None:
-            process.kill()
-            await process.wait()
-        raise RuntimeError(
-            f"Processing timeout after {PROCESSING_TIMEOUT} seconds"
-        ) from exc
-    except asyncio.CancelledError:
-        if process and process.returncode is None:
-            process.kill()
-            await process.wait()
-        raise
     finally:
         cleanup_temp_files(*generated_files)
 

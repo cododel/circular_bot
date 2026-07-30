@@ -4,7 +4,27 @@
 
 **Статус**: MVP работает, основные доработки завершены
 
-**Последние изменения (2026-07-30, ambient)**:
+**Последние изменения (2026-07-30, простой кружок)**:
+- ✓ **Простой путь «видео → кружок»** — на обычное видео бот сначала спрашивает
+  кнопками, что делать: `⭕ Просто кружок` или `🎨 Обработать с оверлеем`
+  (`ProcessingState.waiting_for_mode`, `get_video_mode_keyboard()`)
+  - `process_circle_async()` — центральный квадрат → `VIDEO_NOTE_OUTPUT_SIZE`
+    (512, кламп ≤ 640 и до чётного) → `answer_video_note()`. Ни масок, ни
+    ambient, ни подписи: круглую маску Telegram рисует сам, всё нарисованное
+    нами всё равно ушло бы под неё
+  - Отдельная функция `_build_circle_filter()`, а не ветка в
+    `_build_filter_complex()` — на тот граф завязаны строковые ассерты тестов
+  - Длиннее `VIDEO_NOTE_MAX_DURATION` (60 с) → `-t` обрезает начало, юзер
+    получает предупреждение. Неизвестная длительность (документ без ffprobe)
+    тоже обрезается: длинный кружок Telegram просто не примет
+  - Прогресс считается от `min(duration, limit)`, иначе на обрезанном видео
+    процент застревает
+  - Кружок (video note) развилку не получает — он уже круглый
+- ✓ **`_run_ffmpeg_with_progress()`** — запуск ffmpeg, парсинг `-progress`,
+  таймаут и хвост stderr в ошибку вынесены из `process_video_async()` и
+  переиспользуются обоими путями
+
+**Предыдущие изменения (2026-07-30, ambient)**:
 - ✓ **YouTube-like ambient** — кадр → маленькая цветовая карта (96px) → временное
   сглаживание → размытие → досыщение → растягивание на холст
   - `AMBIENT_MAP_WIDTH` / `AMBIENT_BLUR_SIGMA` / `AMBIENT_SATURATION`
@@ -110,6 +130,11 @@ Ambient: [safe crop] → scale 96px map → tmix (EMA) → gblur → eq → scal
 - `parse_ffmpeg_progress()` — парсинг time= из stderr
 - `progress_callback` — вызывается каждые 10%
 
+**`process_circle_async()`** — простой путь без оверлея:
+- `_build_circle_filter()` — `scale=…:force_original_aspect_ratio=increase` + `crop`
+- `circle_output_size()` / `circle_trim_args()` / `circle_progress_duration()` —
+  лимиты Telegram на исходящий кружок (квадрат ≤ 640 px, ≤ 60 с)
+
 **`extract_video_source()`** — нормализация вложения в `VideoSource(file_id, duration, file_size, kind)`:
 - `video_note` → `kind="video_note"`, длительность из payload
 - `video` → `kind="video"`, длительность из payload
@@ -146,7 +171,8 @@ Ambient: [safe crop] → scale 96px map → tmix (EMA) → gblur → eq → scal
 
 ## Notes
 
-- Кружок Telegram всегда 1:1, 240×240 до 640×640
+- Кружок Telegram всегда 1:1, 240×240 до 640×640 — исходящий кружок отдаём
+  512×512 и не длиннее 60 секунд
 - **В файле кружка за пределами вписанного круга только белая маска Telegram** —
   использовать эти пиксели нельзя ни в одном производном слое
 - Обычное видео любого соотношения сторон обрезается по центру в квадрат

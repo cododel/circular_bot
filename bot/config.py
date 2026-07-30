@@ -74,6 +74,14 @@ VIDEO_NOTE_SAFE_CROP = float(os.getenv("VIDEO_NOTE_SAFE_CROP", "0.70"))
 # that rim falls outside the crop instead of leaving a pale outline.
 VIDEO_NOTE_EDGE_TRIM = float(os.getenv("VIDEO_NOTE_EDGE_TRIM", "0.985"))
 
+# Outgoing video notes, used by the plain "just make it a circle" path. Telegram
+# only accepts square round messages up to 640 px and 60 seconds; longer input
+# is trimmed instead of rejected. Telegram draws the round mask itself, so no
+# masking happens on our side here.
+VIDEO_NOTE_OUTPUT_SIZE = int(os.getenv("VIDEO_NOTE_OUTPUT_SIZE", "512"))
+VIDEO_NOTE_MAX_SIZE = 640
+VIDEO_NOTE_MAX_DURATION = float(os.getenv("VIDEO_NOTE_MAX_DURATION", "60"))
+
 # Curved signature. Font size, gap and tracking are relative to the circle,
 # so the result stays visually consistent across 9:16, 1:1, 16:9 and 4:5.
 TEXT_FONT_SIZE_RATIO = float(os.getenv("TEXT_FONT_SIZE_RATIO", "0.085"))
