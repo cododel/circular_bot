@@ -52,6 +52,12 @@ TEXT_MIN_TRACKING_RATIO = float(os.getenv("TEXT_MIN_TRACKING_RATIO", "0.035"))
 TEXT_ARC_END_DEG = float(os.getenv("TEXT_ARC_END_DEG", "38"))
 TEXT_ARC_MAX_SPAN_DEG = float(os.getenv("TEXT_ARC_MAX_SPAN_DEG", "82"))
 
+# Incoming media limits. The Bot API refuses to serve files larger than 20 MB,
+# so reject them early with a readable message. A local Bot API server lifts
+# that restriction — set 0 to disable the check.
+MAX_VIDEO_SIZE_MB = float(os.getenv("MAX_VIDEO_SIZE_MB", "20"))
+MAX_VIDEO_SIZE_BYTES = int(MAX_VIDEO_SIZE_MB * 1024 * 1024)
+
 # Performance settings
 FFMPEG_THREADS = int(os.getenv("FFMPEG_THREADS", "0"))  # 0 = auto
 

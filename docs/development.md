@@ -65,7 +65,11 @@ cp .env.example .env
 | `TEXT_PADDING_RATIO` | Отступ текста от кружка | 0.02 |
 | `BRIGHTNESS_ADJUST` | Яркость фона | -0.15 |
 | `CONTRAST_ADJUST` | Контраст фона | 1.1 |
+| `MAX_VIDEO_SIZE_MB` | Лимит размера входящего видео, МБ (0 = без лимита) | 20 |
 | `FFMPEG_THREADS` | Потоки FFmpeg (0=авто) | 0 |
+
+> `MAX_VIDEO_SIZE_MB=20` — это лимит Bot API на скачивание файлов ботом.
+> Поднимать его имеет смысл только с локальным Bot API сервером.
 
 ## Запуск бота
 
