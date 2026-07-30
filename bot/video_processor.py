@@ -47,6 +47,7 @@ _LANCZOS = _RESAMPLING.LANCZOS
 _BICUBIC = _RESAMPLING.BICUBIC
 _TEXT_RENDER_SCALE = 3
 _MASK_RENDER_SCALE = 4
+_PROBE_TIMEOUT = 30
 
 
 @dataclass(frozen=True)
@@ -404,6 +405,56 @@ def parse_ffmpeg_progress(line: str, duration: float) -> Optional[float]:
         return min(100.0, (current_time / duration) * 100)
 
     return None
+
+
+async def probe_duration(path: str) -> float:
+    """Read a media duration with ffprobe; return 0.0 when it is unavailable.
+
+    Video notes always carry a duration in the Telegram payload, but regular
+    videos — especially ones sent as documents — may not. Progress reporting
+    needs the duration, so recover it from the downloaded file.
+    """
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        path,
+    ]
+
+    process: Optional[asyncio.subprocess.Process] = None
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await asyncio.wait_for(
+            process.communicate(),
+            timeout=_PROBE_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        if process and process.returncode is None:
+            process.kill()
+            await process.wait()
+        logger.debug("ffprobe timed out for %s", path)
+        return 0.0
+    except OSError:
+        logger.debug("ffprobe is unavailable", exc_info=True)
+        return 0.0
+
+    if process.returncode != 0:
+        return 0.0
+
+    try:
+        duration = float(stdout.decode("utf-8", errors="ignore").strip())
+    except ValueError:
+        return 0.0
+
+    return duration if math.isfinite(duration) and duration > 0 else 0.0
 
 
 def _local_square_size(width: int, height: int, circle_size: int) -> int:

@@ -128,7 +128,28 @@ def test_filter_graph_contains_three_visual_layers() -> None:
     assert graph.endswith("format=yuv420p[outv]")
 
 
-def test_ffmpeg_integration_and_generated_file_cleanup(tmp_path: Path, monkeypatch) -> None:
+def test_every_layer_center_crops_non_square_input() -> None:
+    """Regular videos are not square, so each layer must scale-up then crop."""
+    graph = video_processor._build_filter_complex(720, 1280, 590)
+
+    assert graph.count("force_original_aspect_ratio=increase") == 3
+    assert graph.count("crop=") == 3
+
+
+@pytest.mark.parametrize(
+    ("source_size", "source_label"),
+    [
+        ("256x256", "square video note"),
+        ("320x180", "landscape video"),
+        ("180x320", "portrait video"),
+    ],
+)
+def test_ffmpeg_integration_and_generated_file_cleanup(
+    tmp_path: Path,
+    monkeypatch,
+    source_size: str,
+    source_label: str,
+) -> None:
     ffmpeg = shutil.which("ffmpeg")
     ffprobe = shutil.which("ffprobe")
     if not ffmpeg or not ffprobe:
@@ -148,7 +169,7 @@ def test_ffmpeg_integration_and_generated_file_cleanup(tmp_path: Path, monkeypat
             "-f",
             "lavfi",
             "-i",
-            "testsrc2=size=256x256:rate=8:duration=0.5",
+            f"testsrc2=size={source_size}:rate=8:duration=0.5",
             "-c:v",
             "libx264",
             "-pix_fmt",
@@ -192,3 +213,32 @@ def test_ffmpeg_integration_and_generated_file_cleanup(tmp_path: Path, monkeypat
     assert not list(tmp_path.glob("text_overlay_*.png"))
     assert not list(tmp_path.glob("circle_mask_*.png"))
     assert not list(tmp_path.glob("local_mask_*.png"))
+
+
+def test_probe_duration_reads_a_real_file(tmp_path: Path) -> None:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg or not shutil.which("ffprobe"):
+        pytest.skip("FFmpeg tools are not installed")
+
+    source = tmp_path / "probe.mp4"
+    subprocess.run(
+        [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x180:rate=8:duration=2",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(source),
+        ],
+        check=True,
+    )
+
+    assert asyncio.run(video_processor.probe_duration(str(source))) == pytest.approx(2.0, abs=0.2)

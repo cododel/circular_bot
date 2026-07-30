@@ -33,7 +33,7 @@ def get_username_source_keyboard(
     if original_author:
         buttons.append([
             InlineKeyboardButton(
-                text=f"👤 Автор кружка: {original_author[:20]}",
+                text=f"👤 Автор: {original_author[:20]}",
                 callback_data="username_original"
             )
         ])

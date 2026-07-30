@@ -3,18 +3,28 @@ import os
 import html
 import re
 import uuid
+from dataclasses import dataclass
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery, FSInputFile
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-from bot.config import TEMP_DIR, ALLOWED_USERS
+from bot.config import MAX_VIDEO_SIZE_BYTES, TEMP_DIR, ALLOWED_USERS
 from bot.keyboards import get_aspect_ratio_keyboard, get_username_source_keyboard
-from bot.video_processor import process_video_async, cleanup_temp_files
+from bot.video_processor import (
+    cleanup_temp_files,
+    probe_duration,
+    process_video_async,
+)
 
 
 router = Router()
+
+SEND_VIDEO_HINT = (
+    "Пришли кружок (video note) или обычное видео — "
+    "у обычного видео я возьму центральный квадрат и замаскирую его в круг."
+)
 
 
 def is_user_allowed(user_id: int) -> bool:
@@ -30,6 +40,62 @@ class ProcessingState(StatesGroup):
     waiting_for_text = State()
     waiting_for_username_source = State()  # NEW: Choose username source
     processing = State()
+
+
+@dataclass(frozen=True)
+class VideoSource:
+    """A processable video attached to a message, whatever its kind."""
+
+    file_id: str
+    duration: float
+    file_size: int | None
+    kind: str
+
+
+RECEIVED_PHRASES = {
+    "video_note": "🎯 Кружок получен!",
+    "video": "🎯 Видео получено!",
+}
+
+
+def extract_video_source(message: Message) -> VideoSource | None:
+    """Return the video attached to a message, or None if there is none."""
+    if message.video_note:
+        note = message.video_note
+        return VideoSource(
+            file_id=note.file_id,
+            duration=float(note.duration or 0),
+            file_size=note.file_size,
+            kind="video_note",
+        )
+
+    if message.video:
+        video = message.video
+        return VideoSource(
+            file_id=video.file_id,
+            duration=float(video.duration or 0),
+            file_size=video.file_size,
+            kind="video",
+        )
+
+    document = message.document
+    if document and (document.mime_type or "").startswith("video/"):
+        # Documents carry no duration; ffprobe recovers it after download.
+        return VideoSource(
+            file_id=document.file_id,
+            duration=0.0,
+            file_size=document.file_size,
+            kind="video",
+        )
+
+    return None
+
+
+def exceeds_size_limit(file_size: int | None) -> bool:
+    """Check a declared file size against the Bot API download limit."""
+    if not MAX_VIDEO_SIZE_BYTES or not file_size:
+        return False
+    return file_size > MAX_VIDEO_SIZE_BYTES
 
 
 def get_username_from_user(user) -> str | None:
@@ -107,28 +173,44 @@ async def cmd_start(message: Message):
         return  # Silently ignore
     
     await message.answer(
-        "👋 Привет! Я бот для обработки кружочков Telegram.\n\n"
-        "Отправь мне video note (кружок), и я добавлю на него:\n"
-        "• Чёрный фон вместо белого\n"
+        "👋 Привет! Я бот для обработки видео Telegram.\n\n"
+        "Отправь мне кружок (video note) или обычное видео, и я сделаю:\n"
+        "• Круглую маску по центру кадра\n"
         "• Размытый ambient background\n"
-        "• Подпись в углу\n\n"
+        "• Подпись по дуге круга\n\n"
         "Готовый результат можно скачать в разных форматах (9:16, 1:1, 16:9, 4:5)."
     )
 
 
-@router.message(F.video_note)
-async def handle_video_note(message: Message, state: FSMContext, bot: Bot):
-    """Handle incoming video note (circle)."""
+@router.message(F.video_note | F.video | F.document)
+async def handle_video(message: Message, state: FSMContext):
+    """Handle an incoming video note, regular video or video document."""
     # Check whitelist
     if not is_user_allowed(message.from_user.id):
         return  # Silently ignore
-    
+
+    source = extract_video_source(message)
+    if source is None:
+        # A non-video document landed here through the F.document filter.
+        await message.answer(f"❌ Это не видео.\n{SEND_VIDEO_HINT}")
+        return
+
+    if exceeds_size_limit(source.file_size):
+        limit_mb = MAX_VIDEO_SIZE_BYTES // (1024 * 1024)
+        await message.answer(
+            f"❌ Файл слишком большой ({source.file_size / 1024 / 1024:.1f} МБ). "
+            f"Telegram отдаёт ботам файлы до {limit_mb} МБ — "
+            "пришли видео покороче или пожми его."
+        )
+        return
+
     # Store video info in state
     await state.update_data(
-        video_note_file_id=message.video_note.file_id,
-        video_note_duration=message.video_note.duration,
+        source_file_id=source.file_id,
+        source_duration=source.duration,
+        source_kind=source.kind,
     )
-    
+
     # Get usernames
     sender = get_username_from_user(message.from_user)
     
@@ -169,7 +251,7 @@ async def handle_video_note(message: Message, state: FSMContext, bot: Bot):
     )
     
     await message.answer(
-        "🎯 Кружок получен!\n\n"
+        f"{RECEIVED_PHRASES[source.kind]}\n\n"
         "Выбери, чей юзернейм использовать для подписи:",
         reply_markup=keyboard
     )
@@ -260,9 +342,9 @@ async def process_ratio_selection(callback: CallbackQuery, state: FSMContext, bo
     
     # Get stored data
     data = await state.get_data()
-    file_id = data.get("video_note_file_id")
+    file_id = data.get("source_file_id")
     overlay_text = data.get("overlay_text", "")
-    video_duration = data.get("video_note_duration", 0)
+    video_duration = float(data.get("source_duration") or 0.0)
     
     temp_input = None
     temp_output = None
@@ -282,7 +364,12 @@ async def process_ratio_selection(callback: CallbackQuery, state: FSMContext, bo
         temp_output = os.path.join(TEMP_DIR, f"output_{job_id}_{ratio}.mp4")
         
         await bot.download_file(file.file_path, temp_input)
-        
+
+        # Regular videos may arrive without a usable duration; without it the
+        # progress percentage cannot be computed.
+        if video_duration <= 0:
+            video_duration = await probe_duration(temp_input)
+
         # Progress callback
         async def report_progress(percent: int):
             nonlocal progress_message
@@ -305,7 +392,7 @@ async def process_ratio_selection(callback: CallbackQuery, state: FSMContext, bo
             target_size=target_size,
             overlay_text=overlay_text,
             progress_callback=report_progress,
-            video_duration=float(video_duration),
+            video_duration=video_duration,
         )
         
         # Send result
@@ -346,8 +433,5 @@ async def ignore_other_username_callbacks(callback: CallbackQuery):
 
 @router.message()
 async def handle_other_messages(message: Message):
-    """Handle non-video-note messages."""
-    await message.answer(
-        "Пожалуйста, отправь мне video note (кружок).\n"
-        "Это круглое видео, которое записывается через кнопку с камерой в Telegram."
-    )
+    """Handle messages that carry no video."""
+    await message.answer(SEND_VIDEO_HINT)
